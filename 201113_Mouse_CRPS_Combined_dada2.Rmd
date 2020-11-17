@@ -1,0 +1,210 @@
+---
+title: "201113 Mouse CRPS Combined DADA2 Pathogen Server"
+author: "Rachel Rodgers"
+date: '`r format(Sys.Date(), "%B, %d, %Y")`'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(fig.width=8,
+                      fig.height=6,
+                      warning=FALSE,
+                      message=FALSE)
+```
+
+```{r load-libraries}
+library("dada2")
+library("msa")
+library("phangorn")
+library("phyloseq")
+library("tidyverse")
+```
+
+```{r set-directories}
+#----- Raw Data & Filtered Data Paths -----#
+
+inputDir <- "../data/raw_data"
+filteredDir <- file.path(inputDir, "filtered")
+
+#----- Taxonomy Database Paths -----#
+taxonomyDBPath <- "../../../databases/dada2_taxonomy"
+# GreenGenes
+ggDB <- file.path(taxonomyDBPath, "gg_13_8_train_set_97.fa.gz")
+# RDP
+rdpDB <- file.path(taxonomyDBPath, "rdp_train_set_16.fa.gz")
+rdpDBSpecies <- file.path(taxonomyDBPath, "rdp_species_assignment_16.fa.gz")
+# Silva
+silvaDB <- file.path(taxonomyDBPath, "silva_nr_v128_train_set.fa.gz")
+silvaDBSpecies <- file.path(taxonomyDBPath, "silva_species_assignment_v128.fa.gz")
+# hitDB
+hitDB <- file.path(taxonomyDBPath, "hitdb_v1.00.fa.gz")
+```
+
+This data set contains both mouse and human samples.  Discard the human samples:
+
+```{r sort-samples}
+sampleData <- read.delim("../data/metadata/201113_Mouse_CRPS_combinedMetadata.txt",
+                         check.names = FALSE, stringsAsFactors = FALSE)
+
+mouseSamples <- sampleData %>% 
+  pull(sample) %>% 
+  as.character() %>% 
+  paste0(".fastq")
+
+# grab only the relevant files so we're ignoring extra samples when assessing
+#   quality
+allInputFiles <- sort(list.files(inputDir, pattern = "fastq"))
+inputFiles <- allInputFiles[allInputFiles %in% mouseSamples]
+inputFilePath <- paste0("../data/raw_data/", inputFiles)
+```
+
+Check raw read quality of only the mouse.
+
+```{r rawQualPlot, fig.width=9, fig.height=6}
+rawQualPlot <- plotQualityProfile(inputFilePath, aggregate = TRUE)
+rawQualPlot
+```
+
+Combined data from across two runs shows decreased quality around 225 bp.
+
+```{r filter-and-trim, eval=FALSE}
+filterAndTrim(fwd = file.path(inputDir, inputFiles),
+              filt = file.path(filteredDir, inputFiles),
+              trimLeft = 10, maxEE = 2, truncQ = 11,
+              maxN = 0, rm.phix = TRUE, compress = TRUE, verbose = TRUE,
+              truncLen = 225)
+```
+
+Infer error rates.
+
+```{r filteredFiles}
+# Get list of filtered files and assign sample names to them
+filteredFiles <- list.files(filteredDir, pattern = "fastq", full.names = TRUE)
+# Get the sample names by removing the .fastq and path 
+sampleNames <- map_chr(basename(filteredFiles), 
+                       ~str_remove(string = .x, pattern = ".fastq$"))
+# Assign the sample names to the filteredFiles vector
+names(filteredFiles) <- sampleNames
+```
+
+```{r errF, fig.width=9, fig.height=6}
+set.seed(42250488)
+
+errF <- learnErrors(filteredFiles, multithread = TRUE)
+
+errorPlot <- plotErrors(errF, nominalQ = TRUE)
+errorPlot
+```
+
+Red line is what is expected based on quality score, black line represents estimate, black dots are the observed.  Black dots should track well with the black line.  Here it looks pretty good.
+
+Dereplication.
+
+```{r dereplication}
+# Create a list that will hold dereplication objects for each sample
+singles <- vector("list", length(sampleNames))
+names(singles) <- sampleNames
+# Populate the list
+for(sample in sampleNames) {
+  derepF <- derepFastq(filteredFiles[[sample]])
+  singles[[sample]] <- dada(derepF, err = errF, multithread = TRUE)
+}
+
+rm(derepF)
+```
+
+```{r sequence-table}
+# Construct sequence table and remove chimeras
+sequenceTable <- makeSequenceTable(singles)
+sequenceTableNoChimeras <- removeBimeraDenovo(sequenceTable,
+                                              multithread = TRUE)
+#saveRDS(sequenceTableNoChimeras, "sequenceTableNoChimeras.RDS")
+```
+
+```{r assign-taxonomy}
+taxaRankNamesFull <- c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species")
+taxaRankNamesTrunc <- c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus")
+
+# GreenGenes
+taxaGG <- assignTaxonomy(sequenceTableNoChimeras, ggDB, multithread = TRUE)
+colnames(taxaGG) <- taxaRankNamesFull
+# remove prefixes from taxonomy
+taxaGGModified <- data.frame(taxaGG)
+taxaGGModified <- rownames_to_column(taxaGGModified)
+taxaGGModified <- map_dfc(taxaGGModified, 
+                          function(x) {str_remove(x, pattern = "^[:lower:]__")})
+taxaGGModified <- as.matrix(column_to_rownames(taxaGGModified))
+
+# RDP
+taxaRDP <- assignTaxonomy(sequenceTableNoChimeras, rdpDB, multithread = TRUE)
+colnames(taxaRDP) <- taxaRankNamesTrunc
+taxaRDPPlus <- addSpecies(taxaRDP, rdpDBSpecies)
+
+# Silva
+taxaSilva <- assignTaxonomy(sequenceTableNoChimeras, silvaDB, multithread = TRUE)
+colnames(taxaSilva) <- taxaRankNamesTrunc
+taxaSilvaPlus <- addSpecies(taxaSilva, silvaDBSpecies)
+
+# HitDB
+taxaHitDB <- assignTaxonomy(sequenceTableNoChimeras, hitDB, multithread = TRUE)
+```
+
+```{r eval=FALSE}
+save.image("201113_Mouse_CRPS_Combined_dada2_Pathogen_Server.RData") # read back w/ load() or attach()
+```
+
+```{r construct-phylogenetic-tree}
+# Get the sequences from the sequence table
+seqs <- getSequences(sequenceTableNoChimeras)
+names(seqs) <- seqs
+# Multiple sequence alignment
+mult <- msa(seqs, method = "ClustalW", type = "dna", order = "input")
+# Convert MSA to phyDAT format
+phangAlign <- as.phyDat(mult, type = "dna", order = "input")
+# Compute pairwise distances on phangAlign
+dm <- dist.ml(phangAlign)
+treeNJ <- NJ(dm)
+# Compute likelihood of tree
+fit <- pml(tree = treeNJ, data = phangAlign)
+fitGTR <- update(fit, k = 4, inv = 0.2)
+fitGTR <- optim.pml(fitGTR, model = "GTR", optInv = TRUE, optGamma = TRUE,
+                    rearrangement = "stochastic", 
+                    control = pml.control(trace = 0))
+```
+
+```{r eval=FALSE}
+save.image("201113_Mouse_CRPS_Combined_dada2_Pathogen_Server.RData") # read back w/ load() or attach()
+```
+
+```{r build-phyloseq-objects}
+dir.create("../data/physeqObjects")
+
+# Greengenes
+ps0.gg <- phyloseq(otu_table(sequenceTableNoChimeras, taxa_are_rows = FALSE),
+                   tax_table(taxaGGModified), phy_tree(fitGTR$tree))
+saveRDS(ps0.gg, "../data/physeqObjects/ps0.gg_single.RDS")
+
+# RDP
+ps0.rdp <- phyloseq(otu_table(sequenceTableNoChimeras, taxa_are_rows = FALSE),
+                    tax_table(taxaRDPPlus), phy_tree(fitGTR$tree))
+saveRDS(ps0.rdp, "../data/physeqObjects/ps0.rdp_single.RDS")
+
+# silva
+ps0.silva <- phyloseq(otu_table(sequenceTableNoChimeras, taxa_are_rows = FALSE),
+                      tax_table(taxaSilvaPlus), phy_tree(fitGTR$tree))
+saveRDS(ps0.silva, "../data/physeqObjects/ps0.silva_single.RDS")
+
+# hitDB
+ps0.hitdb <- phyloseq(otu_table(sequenceTableNoChimeras, taxa_are_rows = FALSE),
+                      tax_table(taxaHitDB), phy_tree(fitGTR$tree))
+saveRDS(ps0.hitdb, "../data/physeqObjects/ps0.hitdb_single.RDS")
+```
+
+```{r save-data}
+save.image("201113_Mouse_CRPS_Combined_dada2_Pathogen_Server.RData") # read back w/ load() or attach()
+writeLines(capture.output(sessionInfo()), 
+           "201113_Mouse_CRPS_Combined_dada2_Pathogen_Server_session_info.txt")
+Sys.Date()
+getwd()
+sessionInfo()
+```
