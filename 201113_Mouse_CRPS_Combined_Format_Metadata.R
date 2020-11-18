@@ -18,8 +18,8 @@ names(weekRenameLUT) <- weekNum
 
 formatCohort1 <- dataCohort1 %>% 
   select(SampleName, Cage, Week, Treatment, ReadsPerSample) %>% 
-  rename(sample = SampleName, cage = Cage, week = Week, condition = Treatment,
-         num_reads = ReadsPerSample) %>% 
+  dplyr::rename(sample = SampleName, cage = Cage, week = Week, 
+                condition = Treatment,  num_reads = ReadsPerSample) %>% 
   mutate(week = weekRenameLUT[week],
          cohort = "cohort_1") %>% 
   filter(condition != "none")
@@ -37,7 +37,7 @@ cageLUT <- cageCohort2 %>%
 formatCohort2 <- dataCohort2 %>% 
   mutate(cage = cageLUT[mouse_number]) %>% 
   select(sample, cage, week, group, ReadsPerSample) %>% 
-  rename(condition = group, num_reads = ReadsPerSample) %>% 
+  dplyr::rename(condition = group, num_reads = ReadsPerSample) %>% 
   mutate(condition = ifelse(condition == "treatment",
                             yes = "fracture", no = "control"),
          cohort = "cohort_2")
@@ -46,8 +46,9 @@ formatCohort2 <- dataCohort2 %>%
 # Combine, add crps type.
 
 combinedMetadata <- rbind(formatCohort1, formatCohort2) %>% 
-  mutate(crps_type = case_when(week %in% c("week_3", "week_5") ~ "acute",
-                               week %in% c("week_9", "week_16") ~ "chronic",
+  mutate(crps_type = case_when(week %in% c("week_3", "week_5") & condition != "control" ~ "acute",
+                               week %in% c("week_9", "week_16") & condition != "control" ~ "chronic",
+                               week == "week_0" & condition != "control" ~ "baseline",
                                TRUE ~ "control"))
 
 row.names(combinedMetadata) <- combinedMetadata$sample
