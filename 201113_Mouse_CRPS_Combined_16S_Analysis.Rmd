@@ -1,0 +1,851 @@
+---
+title: "Mouse CRPS Combined Cohorts 16S Analysis (Non-rarefied)"
+author: "Rachel Rodgers"
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+output: 
+  html_document:
+      code_folding: hide
+runtime: shiny
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(fig.width=8,
+                      fig.height=6,
+                      warning = FALSE,
+                      message = FALSE)
+```
+
+```{r load-libraries, message=FALSE, include=FALSE}
+library("shiny")
+library("phyloseq")
+library("vegan")
+library("gridExtra")
+library("knitr")
+library("DESeq2")
+library("plotly")
+library("microbiome")
+library("data.table")
+library("ggrepel")
+library("ggpubr")
+library("scales")
+library("plyr")
+library("DT")
+library("picante")
+library("gridExtra")
+library("tidyverse")
+
+source("./shared_R_scripts/Helper_Functions.R")
+
+options(shiny.sanitize.errors = FALSE)
+```
+
+## Overview {.tabset}
+
+---
+
+Analysis of combined mouse CRPS cohorts 1 (190809) and 2 (201019).
+
+Analyzed:
+<ol>
+<li>separate cohort:</li>
+<ul>
+  <li>control 1</li>
+  <li>control 2</li>
+  <li>treatment 1</li>
+  <li>treatment 2</li>
+</ul>
+<li>combined cohort:</li>
+<ul>
+  <li>combined controls</li>
+  <li>combined treatments</li>
+<ul>
+</ol>
+
+----
+
+```{r physeqRaw, results='hide'}
+physeqRaw <- readRDS("../data/physeqObjects/ps0.rdp_single.RDS")
+physeqRaw # 947 taxa x 212 samples
+any(sample_sums(physeqRaw) == 0) # some samples are empty
+any(taxa_sums(physeqRaw) == 0) # no taxa are currently empty
+
+# which samples are empty?
+emptySamples <- names(sample_sums(physeqRaw)[sample_sums(physeqRaw) == 0])
+```
+
+```{r sampleDataModified, results='hide'}
+sampleData <- read.delim("../data/metadata/201113_Mouse_CRPS_combinedMetadata.txt",
+                         stringsAsFactors = FALSE, check.names = FALSE)
+
+# edit caging information
+# add group: cohort_x_condition
+sampleDataModified <- sampleData %>% 
+  mutate(cage_num = paste("cage", str_extract(cage, "[:digit:]"),
+                          sep = "_"),
+         group = paste(cohort, condition, sep = "_"),
+         cage_cohort = paste(cohort, cage, sep = "_"))
+
+# edit factor levels
+sampleDataModified$cohort <- factor(sampleDataModified$cohort,
+                                    levels = c("cohort_1", "cohort_2"))
+
+sampleDataModified$condition <- factor(sampleDataModified$condition,
+                                       levels = c("control", "fracture"))
+
+sampleDataModified$crps_type <- factor(sampleDataModified$crps_type,
+                                       levels = c("control", "baseline", 
+                                                  "acute", "chronic"))
+
+sampleDataModified$week <- factor(sampleDataModified$week,
+                                  levels = c("week_0", "week_3", "week_5",
+                                             "week_9", "week_16"))
+
+row.names(sampleDataModified) <- sampleDataModified$sample
+```
+
+```{r physeqMerged, results='hide'}
+physeqMerged <- merge_phyloseq(sample_data(sampleDataModified),
+                               physeqRaw)
+physeqMerged # 947 x 212
+```
+
+### **QC** 
+
+<br>
+
+#### **Sample Outlier Removal**
+
+<br>
+
+**By unexpected read count:**
+
+Checking the average read count across all samples to determine if any samples have unexpected numbers of reads.
+
+```{r avReadsAllPlot}
+avgReadsAllPlot <- ggplot(sampleDataModified,
+                          aes(x = group, y = num_reads,
+                              fill = group)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter(width = 0.2) +
+  geom_hline(yintercept = 1000, lty = 2) +
+  geom_text_repel(aes(label = paste(sample, ": ", num_reads)),
+                  data = subset(sampleDataModified, num_reads <= 1000),
+                  fontface = 'bold', show.legend = TRUE) +
+  ylab("Reads per Sample") +
+  ggtitle("Average Reads per Treatment and Cohort",
+          subtitle = "All Weeks Combined") +
+  theme_pubr() +
+  theme(legend.position = "none",
+        plot.title = element_text(hjust = 0.5),
+        plot.subtitle = element_text(hjust = 0.5),
+        axis.title.x = element_blank()) +
+  stat_compare_means(method = "kruskal.test", label.x.npc = 0)
+avgReadsAllPlot
+```
+
+Analysis will benefit from the removal the uninformative, low-read samples:
+
+<ul>
+  <li>BL-982 (943 reads)</li>
+  <li>BL-984 (0 reads)</li>
+  <li>BL-985 (1 read)</li>
+  <li>Baldridge_62 (2 reads)</li>
+  <li>Baldridge_9 (1 read)</li>
+</ul>
+
+```{r physeqTrimmed, results='hide'}
+lowReadSamples <- sampleDataModified %>% 
+  filter(num_reads < 1000) %>% 
+  pull(sample) %>% 
+  as.character()
+
+keepSamples <- sampleDataModified$sample[!(sampleDataModified$sample %in% lowReadSamples)]
+
+physeqTrimmed <- physeqMerged %>% 
+  prune_samples(samples = as.character(keepSamples)) %>% 
+  RemoveMissingTaxa()
+
+physeqTrimmed # 942 taxa x 207 samples
+```
+
+**By Clustering:**
+
+```{r subtset-physeqTrimmed}
+sampleDataTrimmed <- as(sample_data(physeqTrimmed), "data.frame")
+
+weeks = list("Week 0" = "week_0", "Week 3" = "week_3",
+             "Week 5" = "week_5", "Week 9" = "week_9",
+             "Week 16" = "week_16")
+
+# Pull the sample names for each week so physeq object can be subsetted
+sampleNameList <- pmap(.l = list(currWeek = weeks),
+                       .f = function(df, currWeek) {
+                         samples <- df %>% filter(week == currWeek) %>% 
+                           pull(sample) %>% as.character()},
+                       df = sampleDataTrimmed)
+
+subsetPhyseqTrimmedList <- pmap(.l = list(sampleGroup = sampleNameList),
+                                .f = function(psObj, sampleGroup) {
+                                  psSub <- psObj %>% 
+                                    prune_samples(samples = sampleGroup) %>% 
+                                    RemoveMissingTaxa()},
+                                psObj = physeqTrimmed)
+
+```
+
+
+```{r mds-bray-reactive}
+inputPanel(
+  # select week
+  selectInput(inputId = "brayPlotWeek", 
+              label = "Week", 
+              choices = names(weeks)),
+  # select whether to include sample names as labels on the plot
+  checkboxInput(inputId = "showMDSLabels", 
+                label = "Show point labels",
+                value = FALSE),
+  # select whether to include norm-type confidence ellipses on plot
+  checkboxInput(inputId = "showMDSEllipses",
+                label = "Show confidence ellipses",
+                value = TRUE)
+)
+
+# calculate ordination in response to week selection
+CalculateBrayOrdination <- reactive({
+  withProgress(message = "Calculating Bray Ordination...", value = 1, {
+    set.seed(15651876)
+    ordBray <- ordinate(subsetPhyseqTrimmedList[[input$brayPlotWeek]], 
+                        method = "MDS", distance = "bray")
+  })
+})
+
+# draw plot for selected week
+
+renderPlot({
+  basePlot <- plot_ordination(
+    isolate(subsetPhyseqTrimmedList[[input$brayPlotWeek]]),
+    ordination = CalculateBrayOrdination(),
+    color = "group",
+    shape = "group") +
+    scale_shape_manual(values = c(15, 16, 17, 18)) +
+    theme_bw() +
+    theme(legend.title = element_text(size = 18),
+          legend.text = element_text(size = 16),
+          axis.title.x = element_text(size = 14),
+          axis.title.y = element_text(size = 14),
+          axis.text.x = element_text(size = 12),
+          axis.text.y = element_text(size = 12)) +
+    geom_point(size = 4.5, alpha = 0.9)
+  
+  if (input$showMDSLabels) {
+    basePlot <- basePlot + 
+      geom_text_repel(aes_string(label = "sample"),
+                      color = "grey30", size = 4)
+  }
+  
+  if(input$showMDSEllipses == TRUE) {
+    basePlot <- basePlot + stat_ellipse(type = "norm")
+  }
+  
+  basePlot
+  
+}, height = 600, width = 900)
+
+```
+
+Outliers by clustering are not obvious, and no samples will be removed here.
+
+<br>
+
+#### **Read Distributions**
+
+```{r numReadsStats}
+summary(sampleDataTrimmed$num_reads)
+```
+
+Read counts for combined cohorts after outlier removal range from 4,214 to 14,955 reads per sample, with an average of 8,685 reads per sample.
+
+```{r readDistribution, fig.width=9, fig.height=6}
+# histogram showing distribution of read counts
+readDistPlot <- ggplot(sampleDataTrimmed,
+                       aes(x = num_reads, fill = group)) +
+  geom_histogram(color = "black", binwidth = 1000) +
+  stat_bin(binwidth = 1000, geom = "text", size = 3.5,
+           aes(label = ..count..),
+           position = position_stack(vjust = 0.5)) +
+  ggtitle("Read Distribution") +
+  xlab("Number of Reads") +
+  ylab("Number of Samples") +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5))
+readDistPlot
+```
+
+Also checking average reads by treatment over each week to make sure significant differences in read counts across treatment groups don't already exist due a technical problem.
+
+<br>
+
+**Average Reads by Treatment by Week:**
+
+```{r average-reads-by-condition, fig.width=9, fig.height=6}
+avgReadsByCondPlot <- ggplot(sampleDataTrimmed,
+                             aes(x = group, y = num_reads,
+                                 fill = group)) +
+  facet_wrap("~ week") +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter(width = 0.2) +
+  ylab("Reads per Sample") +
+  ggtitle("Average Reads per Treatment, Faceted by Week") +
+  theme_pubr() +
+  theme(plot.title = element_text(hjust = 0.5),
+        axis.text.x = element_blank(),
+        axis.title.x = element_blank()) +
+  stat_compare_means(method = "kruskal.test", label.x.npc = 0.3, 
+                     label.y.npc = 0.9, size = 3.5)
+avgReadsByCondPlot
+```
+
+<br>
+
+#### **Taxa Filtering**
+
+Non-bacterial taxa need to be removed from the data set for further analysis.
+
+```{r filter-non-bacterial, results='hide'}
+# originally 942 x 207
+physeqBacteria <- physeqTrimmed %>% 
+  subset_taxa(Kingdom == "Bacteria" & Phylum != "Cyanobacteria/Chloroplast")
+
+# did this deplete any samples?
+any(sample_sums(physeqBacteria) == 0)
+
+physeqBacteria # 906 x 207
+```
+
+Removal of non-bacterial taxa has dropped the total taxa count from 942 to 906.
+
+```{r save-physeq-bacteria-for-lefse, eval=FALSE, include=FALSE}
+saveRDS(physeqBacteria, "../data/physeqObjects/physeqBacteria_crps_combined_cohort.RDS")
+```
+
+Checking the prevalence and abundance values of different bacterial families to see if there are any low abundance/prevalence taxa.
+
+```{r phylaPrevalence, fig.width=9, fig.height=6}
+phylaPrevalence <- TaxRankPrevalence(physeqBacteria, "Phylum")
+phylaPrevalence$prevalence_table
+
+phylaPrevalencePlot <- ggplot(phylaPrevalence$prevalence_df,
+                              aes(x = TotalAbundance,
+                                  y = Prevalence/nsamples(physeqBacteria),
+                                  color = Family)) +
+  geom_hline(yintercept = 1/207, alpha = 0.5, linetype = 2) +
+  geom_point(size = 3, alpha = 0.7) +
+  scale_x_log10() +
+  xlab("Total Abundance") +
+  ylab("Prevalence [Frac. Samples]") +
+  facet_wrap(~ Phylum) +
+  theme_bw() +
+  theme(legend.position = "none",
+        plot.title = element_text(hjust = 0.5),
+        plot.subtitle = element_text(hjust = 0.5)) +
+  ggtitle("Phylum Prevalence in All Samples",
+          subtitle = "Colored by Familiy")
+phylaPrevalencePlot
+```
+
+### **16S Analysis: 4 Groups**
+
+#### **Community Composition**
+
+```{r subsetPhyseqBacteriaList}
+# subset physeqBacteria by week, store in list
+subsetPhyseqBacteriaList <- pmap(.l = list(sampleGroup = sampleNameList),
+                                 .f = function(psObj, sampleGroup) {
+                                   psSub <- psObj %>%
+                                     prune_samples(samples = sampleGroup) %>%
+                                     RemoveMissingTaxa()},
+                                 psObj = physeqBacteria)
+```
+
+```{r comm-comp-4groups}
+
+#----- UI -----#
+
+inputPanel(
+  # select physeq object by week
+  selectInput(inputId = "commPhyseqObj4", label = "Week:", 
+              choices = names(weeks),
+              selected = "Week 0"),
+  # select taxonomic rank
+  selectInput(inputId = "commTaxRank4", label = "Taxonomic Rank:",
+              choices = c("Kingdom", "Phylum", "Class", "Order", "Family",
+                          "Genus", "Species"),
+              selected = "Phylum"),
+  # select abundance filter
+  sliderInput(inputId = "abdFilter4", label = "Abundance Filter",
+              min = 0, max = 1, step = 0.05, value = 0),
+  # hide NA?
+  checkboxInput(inputId = "hideNA4", label = "Hide unnamed taxa", value = FALSE)
+)
+# update
+actionButton(inputId = "updateCommComp4", label = "Update Composition Plot",
+             icon = icon("fas fa-sync-alt"))
+
+#----- React -----#
+
+CalculateAbundance <- eventReactive(input$updateCommComp4, {
+  
+  withProgress(message = "Calculating Abundance...", value = 1, {
+                 abdDF <- MakeAbundanceDF(physeq = subsetPhyseqBacteriaList[[input$commPhyseqObj4]],
+                                          taxRank = input$commTaxRank4,
+                                          abundanceFilter = input$abdFilter4,
+                                          pruneMissing = input$hideNA4)
+
+                 if (dim(abdDF)[1] == 0) {
+                   stop("No taxa meet this filtering criteria. 
+                        Try lowering the Abundance Filter option.",
+                        call. = FALSE)
+                 } else {
+                   if (input$commTaxRank4 == "Species") {
+                     
+                     abdDF <- mutate(abdDF,
+                                     "GenusSpecies" = paste(Genus, Species, 
+                                                            sep = " "),
+                                     no = "other")
+                   } # end of 2nd if/else
+                 } # end of 1st if/else
+                 abdDF # return object
+               })# end of WithProgress()
+}, ignoreNULL = FALSE) # end of eventReactive()
+
+
+renderPlotly({
+  compPlot <- PlotCommunityComposition(abdDF = CalculateAbundance(),
+                                       taxRank = ifelse(isolate(input$commTaxRank4) == "Species",
+                                                        yes = "GenusSpecies",
+                                                        no = isolate(input$commTaxRank4)),
+                                       facetFormula = "~ group")
+  
+  ggplotly(compPlot, height = 600, width = 1000)
+})
+```
+
+<br>
+<br>
+<br>
+<br>
+<br>
+<br>
+<br>
+<br>
+<br>
+<br>
+<br>
+
+#### **Alpha Diversity**
+
+```{r alpha-div-idx}
+alphaIdxList <- list("Richness" = "observed", "evenness" = "evenness_pielou",
+                     "Shannon Diversity" = "diversity_shannon", 
+                     "Faith's PD" = "PD")
+
+alphaDiv <- microbiome::alpha(physeqBacteria, index = c("observed",
+                                                        "evenness_pielou",
+                                                        "diversity_shannon"))
+
+faithsPD <- pd(as.data.frame(physeqBacteria@otu_table),
+               physeqBacteria@phy_tree,
+               include.root = FALSE)
+
+allAlphaDiv <- merge(alphaDiv, faithsPD, by = "row.names", all = TRUE)
+allAlphaDiv <- column_to_rownames(allAlphaDiv, var = "Row.names")
+
+sampleDataBacteria <- merge(as(sample_data(physeqBacteria), "data.frame"), 
+                            allAlphaDiv, by = "row.names", all = TRUE)
+```
+
+```{r save-sampleDataBacteria, echo=FALSE, include=FALSE}
+write.table(sampleDataBacteria, 
+            file = "../analysis/results/sampleData_withAlphaIdx.txt",
+            quote = FALSE, sep = "\t", row.names = FALSE)
+
+```
+
+```{r alpha-div-4groups}
+
+#----- UI -----#
+
+inputPanel(
+  selectInput(inputId = "alphaDiv4", label = "Week:", choices = weeks)
+)
+
+#----- React -----#
+
+alphaDivDF4 <- reactive(
+  filter(sampleDataBacteria, week == input$alphaDiv4)
+)
+
+alphaDivPlots4 <- reactive({
+  pmap(.l = list(yVar = alphaIdxList,
+                 yLab = names(alphaIdxList)),
+       .f = PlotAlphaDiversity,
+       df = alphaDivDF4(),
+       xVar = "group",
+       statMethod = "kruskal.test")
+})
+
+renderPlot({
+  grid.arrange(alphaDivPlots4()[["Richness"]],
+               alphaDivPlots4()[["Faith's PD"]],
+               alphaDivPlots4()[["Shannon Diversity"]],
+               ncol = 2,
+               nrow = 2)
+}, width = 900, height = 900)
+br()
+```
+
+#### **Beta Diversity**
+
+```{r beta-diversity-4groups}
+
+#----- UI -----#
+
+inputPanel(
+  # select week
+  selectInput(inputId = "pcoaPhyseqObject4", label = "Week:",
+              choices = names(weeks)),
+  # select distance method 
+  radioButtons(inputId = "pcoaDistanceMethod4", label = "Distance Method:",
+               choices = c("UniFrac" = "unifrac",
+                           "Weighted UniFrac" = "wunifrac"),
+               selected = "unifrac"),
+  # include sample names as labels on the plot?
+  checkboxInput(inputId = "pcoaShowLabels4", label = "Show point labels",
+                value = FALSE),
+  # want to see norm-type confidence ellipses?  they can be distracting
+  checkboxInput(inputId = "pcoaShowEllipses4", 
+                label = "Show confidence ellipses", value = TRUE)
+)
+
+#----- React -----#
+
+CalculateOrdination4 <- reactive({
+  withProgress(message = "Calculating ordination (4 groups)...", value = 1, {
+    # Generate ordination object
+    set.seed(20097511)
+    ordinationObj <- ordinate(subsetPhyseqBacteriaList[[input$pcoaPhyseqObject4]],
+                              method = "PCoA",
+                              distance = input$pcoaDistanceMethod4)
+  })
+})
+
+renderPlot({
+  basePlot <- plot_ordination(subsetPhyseqBacteriaList[[isolate(input$pcoaPhyseqObject4)]],
+                              ordination = CalculateOrdination4(),
+                              color = "group", shape = "group") +
+    scale_shape_manual(values = c(15, 16, 17, 18)) +
+    theme_bw() +
+    theme(legend.title = element_text(size = 18),
+          legend.text = element_text(size = 16),
+          axis.title.x = element_text(size = 14),
+          axis.title.y = element_text(size = 14),
+          axis.text.x = element_text(size = 12),
+          axis.text.y = element_text(size = 12)) +
+    geom_point(size = 4)
+  
+  if (input$pcoaShowLabels4) {
+    basePlot <- basePlot +
+      geom_text_repel(aes_string(label = "sample"), color = "grey30", size = 4)
+  }
+  
+  if (input$pcoaShowEllipses4 == TRUE) {
+    basePlot <- basePlot + stat_ellipse(type = "norm")
+  }
+  
+  basePlot
+  
+}, height = 600, width = 900)
+```
+
+**ADONIS Results for selected Week and Distance Measure:**
+
+ADONIS is used to determine whether clustering on the PCoA plot is significant based on condition.
+
+```{r beta-adonis-4groups}
+renderPrint(
+  RunAdonis(physeqObj = subsetPhyseqBacteriaList[[input$pcoaPhyseqObject4]],
+            category = "group", distance = input$pcoaDistanceMethod4)
+)
+```
+
+### **16S Analysis: 2 Groups**
+
+#### **Community Composition**
+
+```{r comm-comp-2groups}
+
+#----- UI -----#
+
+inputPanel(
+  # select physeq object by week
+  selectInput(inputId = "commPhyseqObj2", label = "Week:", 
+              choices = names(weeks),
+              selected = "Week 0"),
+  # select taxonomic rank
+  selectInput(inputId = "commTaxRank2", label = "Taxonomic Rank:",
+              choices = c("Kingdom", "Phylum", "Class", "Order", "Family",
+                          "Genus", "Species"),
+              selected = "Phylum"),
+  # select abundance filter
+  sliderInput(inputId = "abdFilter2", label = "Abundance Filter",
+              min = 0, max = 1, step = 0.05, value = 0),
+  # hide NA?
+  checkboxInput(inputId = "hideNA2", label = "Hide unnamed taxa", value = FALSE)
+)
+# update
+actionButton(inputId = "updateCommComp2", label = "Update Composition Plot",
+             icon = icon("fas fa-sync-alt"))
+
+#----- React -----#
+
+CalculateAbundance2 <- eventReactive(input$updateCommComp2, {
+  
+  withProgress(message = "Calculating Abundance...", value = 1, {
+                 abdDF <- MakeAbundanceDF(physeq = subsetPhyseqBacteriaList[[input$commPhyseqObj2]],
+                                          taxRank = input$commTaxRank2,
+                                          abundanceFilter = input$abdFilter2,
+                                          pruneMissing = input$hideNA4)
+
+                 if (dim(abdDF)[1] == 0) {
+                   stop("No taxa meet this filtering criteria. 
+                        Try lowering the Abundance Filter option.",
+                        call. = FALSE)
+                 } else {
+                   if (input$commTaxRank4 == "Species") {
+                     
+                     abdDF <- mutate(abdDF,
+                                     "GenusSpecies" = paste(Genus, Species, 
+                                                            sep = " "),
+                                     no = "other")
+                   } # end of 2nd if/else
+                 } # end of 1st if/else
+                 abdDF # return object
+               })# end of WithProgress()
+}, ignoreNULL = FALSE) # end of eventReactive()
+
+
+renderPlotly({
+  compPlot <- PlotCommunityComposition(abdDF = CalculateAbundance2(),
+                                       taxRank = ifelse(isolate(input$commTaxRank2) == "Species",
+                                                        yes = "GenusSpecies",
+                                                        no = isolate(input$commTaxRank2)),
+                                       facetFormula = "~ condition")
+  
+  ggplotly(compPlot, height = 600, width = 1000)
+})
+```
+
+<br>
+<br>
+<br>
+<br>
+<br>
+<br>
+<br>
+<br>
+<br>
+<br>
+<br>
+
+#### **Alpha Diversity**
+
+```{r alpha-div-2groups}
+
+#----- UI -----#
+
+inputPanel(
+  selectInput(inputId = "alphaDiv2", label = "Week:", choices = weeks)
+)
+
+#----- React -----#
+
+alphaDivDF2 <- reactive(
+  filter(sampleDataBacteria, week == input$alphaDiv2)
+)
+
+alphaDivPlots2 <- reactive({
+  pmap(.l = list(yVar = alphaIdxList,
+                 yLab = names(alphaIdxList)),
+       .f = PlotAlphaDiversity,
+       df = alphaDivDF2(),
+       xVar = "condition",
+       statMethod = "wilcox.test")
+})
+
+renderPlot({
+  grid.arrange(alphaDivPlots2()[["Richness"]],
+               alphaDivPlots2()[["Faith's PD"]],
+               alphaDivPlots2()[["Shannon Diversity"]],
+               ncol = 2,
+               nrow = 2)
+}, width = 900, height = 900)
+br()
+```
+
+#### **Beta Diversity**
+
+```{r beta-diversity-2groups}
+
+#----- UI -----#
+
+inputPanel(
+  # select week
+  selectInput(inputId = "pcoaPhyseqObject2", label = "Week:",
+              choices = names(weeks)),
+  # select distance method 
+  radioButtons(inputId = "pcoaDistanceMethod2", label = "Distance Method:",
+               choices = c("UniFrac" = "unifrac",
+                           "Weighted UniFrac" = "wunifrac"),
+               selected = "unifrac"),
+    # select which variable to color the points by (radio button)
+  radioButtons(inputId = "pcoaColorVar", label = "Color Points By:",
+               choices = c("Condition" = "condition", "Cage" = "cage_cohort")),
+  
+  br(),
+  # include sample names as labels on the plot?
+  checkboxInput(inputId = "pcoaShowLabels2", label = "Show point labels",
+                value = FALSE),
+  # want to see norm-type confidence ellipses?  they can be distracting
+  checkboxInput(inputId = "pcoaShowEllipses2", 
+                label = "Show confidence ellipses", value = TRUE)
+)
+
+#----- React -----#
+
+CalculateOrdination2 <- reactive({
+  withProgress(message = "Calculating ordination (2 groups)...", value = 1, {
+    # Generate ordination object
+    set.seed(10890127)
+    ordinationObj <- ordinate(subsetPhyseqBacteriaList[[input$pcoaPhyseqObject2]],
+                              method = "PCoA",
+                              distance = input$pcoaDistanceMethod2)
+  })
+})
+
+renderPlot({
+  basePlot <- plot_ordination(subsetPhyseqBacteriaList[[isolate(input$pcoaPhyseqObject2)]],
+                              ordination = CalculateOrdination2(),
+                              color = input$pcoaColorVar, shape = "condition") +
+    scale_shape_manual(values = c(15, 16)) +
+    theme_bw() +
+    theme(legend.title = element_text(size = 18),
+          legend.text = element_text(size = 16),
+          axis.title.x = element_text(size = 14),
+          axis.title.y = element_text(size = 14),
+          axis.text.x = element_text(size = 12),
+          axis.text.y = element_text(size = 12)) +
+    geom_point(size = 4)
+  
+  if (input$pcoaColorVar == "condition") {
+    basePlot <- basePlot +
+      scale_color_manual(values = c("blue", "red"))
+  }
+  
+  if (input$pcoaShowLabels2) {
+    basePlot <- basePlot +
+      geom_text_repel(aes_string(label = "sample"), color = "grey30", size = 3.5)
+  }
+  
+  if (input$pcoaShowEllipses2 == TRUE) {
+    basePlot <- basePlot + stat_ellipse(type = "norm")
+  }
+  
+  basePlot
+  
+}, height = 600, width = 900)
+```
+
+**ADONIS Results for selected Week and Distance Measure:**
+
+ADONIS is used to determine whether clustering on the PCoA plot is significant based on group.
+
+```{r beta-adonis-2groups}
+renderPrint(
+  RunAdonis(physeqObj = subsetPhyseqBacteriaList[[input$pcoaPhyseqObject2]],
+            category = input$pcoaColorVar, distance = input$pcoaDistanceMethod2)
+)
+```
+
+### **Biomarkers: 2 groups**
+
+#### **Acute (combined weeks 3 & 5) vs Chronic (combined weeks 9 & 16)**
+
+```{r subset-only-crps, results='hide'}
+crpsSamples <- sampleDataBacteria %>% 
+  filter(crps_type %in% c("acute", "chronic")) %>% 
+  pull(sample) %>% 
+  as.character()
+
+keepCRPS <- sampleDataBacteria$sample[(sampleDataBacteria$sample %in% crpsSamples)]
+
+physeqCRPS <- physeqBacteria %>% 
+  prune_samples(samples = as.character(keepCRPS)) %>% 
+  RemoveMissingTaxa()
+
+physeqCRPS # 632 x 83
+```
+
+
+```{r deseq}
+
+#----- UI -----#
+
+inputPanel(
+  radioButtons(inputId = "deseqSigThresh2", label = "Significance Threshold:",
+               choices = c("0.05", "0.1"), selected = "0.05")
+)
+actionButton(inputId = "updateDESeq2", label = "Update DESeq Analysis",
+             icon = icon("fas fa-sync-alt"))
+
+br()
+br()
+
+#----- React -----#
+
+RunDESeq <- eventReactive(input$updateDESeq2, {
+  
+  withProgress(message = "Conducting DESeq analysis by CRPS type", value = 1, {
+    set.seed(47126435)
+    GenerateDESeqResults(physeq = physeqCRPS,
+                         variable = "crps_type",
+                         numerator = "chronic",
+                         denominator = "acute")
+  })
+}, ignoreNULL = FALSE)
+
+GetDESeqResults <- reactive(
+  GenerateDESeqResultsTable(physeq = physeqCRPS,
+                            sigThreshold = isolate(as.numeric(input$deseqSigThresh2)),
+                            ddsResults = RunDESeq())
+)
+
+renderPlotly({
+  volcano <- PlotStaticVolcano(physeq = physeqCRPS,
+                               resultsDataTable = GetDESeqResults(),
+                               sigThreshold = isolate(as.numeric(input$deseqSigThresh2)),
+                               plotTitle = "Differentially Abundant Taxa
+                               Acute (- L2FC) vs Chronic (+ L2FC)")
+  
+  ggplotly(volcano, tooltip = c("Phylum", "Family", "Genus", "Species",
+                                "log2FoldChange", "baseMean"),
+           height = 550, width = 900)
+})
+```
+
+### Session Info
+
+```{r session-info}
+Sys.Date()
+getwd()
+sessionInfo()
+```
