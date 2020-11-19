@@ -1,5 +1,5 @@
 ---
-title: "Mouse CRPS Combined Cohorts 16S Analysis (Non-rarefied)"
+title: "Mouse CRPS Combined Cohorts 16S Analysis (Rarefied)"
 author: "Rachel Rodgers"
 date: '`r format(Sys.Date(), "%B %d, %Y")`'
 output: 
@@ -43,7 +43,7 @@ options(shiny.sanitize.errors = FALSE)
 
 ---
 
-Analysis of combined mouse CRPS cohorts 1 (190809) and 2 (201019).
+Analysis of combined mouse CRPS cohorts 1 (190809) and 2 (201019) using rarefied data.
 
 Analyzed:
 
@@ -61,115 +61,15 @@ Analyzed:
 
 ----
 
-```{r physeqRaw, results='hide', include=FALSE}
-physeqRaw <- readRDS("../data/physeqObjects/ps0.rdp_single.RDS")
-physeqRaw # 947 taxa x 212 samples
-any(sample_sums(physeqRaw) == 0) # some samples are empty
-any(taxa_sums(physeqRaw) == 0) # no taxa are currently empty
-
-# which samples are empty?
-emptySamples <- names(sample_sums(physeqRaw)[sample_sums(physeqRaw) == 0])
+```{r physeqBacteria, results='hide', include=FALSE}
+physeqBacteriaNonRare <- readRDS("../data/physeqObjects/physeqBacteria_crps_combined_cohort.RDS")
+physeqBacteria <- rarefy_even_depth(physeqBacteriaNonRare, rngseed = 54043710)
+# rarefying dropped 290 taxa; reads dropped to 4,204
+physeqBacteria # 877 x 207
 ```
 
-```{r sampleDataModified, results='hide', include=FALSE}
-sampleData <- read.delim("../data/metadata/201113_Mouse_CRPS_combinedMetadata.txt",
-                         stringsAsFactors = FALSE, check.names = FALSE)
-
-# edit caging information
-# add group: cohort_x_condition
-sampleDataModified <- sampleData %>% 
-  mutate(cage_num = paste("cage", str_extract(cage, "[:digit:]"),
-                          sep = "_"),
-         group = paste(cohort, condition, sep = "_"),
-         cage_cohort = paste(cohort, cage, sep = "_"))
-
-# edit factor levels
-sampleDataModified$cohort <- factor(sampleDataModified$cohort,
-                                    levels = c("cohort_1", "cohort_2"))
-
-sampleDataModified$condition <- factor(sampleDataModified$condition,
-                                       levels = c("control", "fracture"))
-
-sampleDataModified$crps_type <- factor(sampleDataModified$crps_type,
-                                       levels = c("control", "baseline", 
-                                                  "acute", "chronic"))
-
-sampleDataModified$week <- factor(sampleDataModified$week,
-                                  levels = c("week_0", "week_3", "week_5",
-                                             "week_9", "week_16"))
-
-row.names(sampleDataModified) <- sampleDataModified$sample
-```
-
-```{r physeqMerged, results='hide', include=FALSE}
-physeqMerged <- merge_phyloseq(sample_data(sampleDataModified),
-                               physeqRaw)
-physeqMerged # 947 x 212
-```
-
-### **QC** 
-
-<br>
-
-#### **Sample Outlier Removal**
-
-<br>
-
-**By unexpected read count:**
-
-Checking the average read count across all samples to determine if any samples have unexpected numbers of reads.
-
-```{r avReadsAllPlot}
-avgReadsAllPlot <- ggplot(sampleDataModified,
-                          aes(x = group, y = num_reads,
-                              fill = group)) +
-  geom_boxplot(outlier.shape = NA) +
-  geom_jitter(width = 0.2) +
-  geom_hline(yintercept = 1000, lty = 2) +
-  geom_text_repel(aes(label = paste(sample, ": ", num_reads)),
-                  data = subset(sampleDataModified, num_reads <= 1000),
-                  fontface = 'bold', show.legend = TRUE) +
-  ylab("Reads per Sample") +
-  ggtitle("Average Reads per Treatment and Cohort",
-          subtitle = "All Weeks Combined") +
-  theme_pubr() +
-  theme(legend.position = "none",
-        plot.title = element_text(hjust = 0.5),
-        plot.subtitle = element_text(hjust = 0.5),
-        axis.title.x = element_blank()) +
-  stat_compare_means(method = "kruskal.test", label.x.npc = 0)
-avgReadsAllPlot
-```
-
-Analysis will benefit from the removal the uninformative, low-read samples:
-
-<ul>
-  <li>BL-982 (943 reads)</li>
-  <li>BL-984 (0 reads)</li>
-  <li>BL-985 (1 read)</li>
-  <li>Baldridge_62 (2 reads)</li>
-  <li>Baldridge_9 (1 read)</li>
-</ul>
-
-```{r physeqTrimmed, results='hide'}
-lowReadSamples <- sampleDataModified %>% 
-  filter(num_reads < 1000) %>% 
-  pull(sample) %>% 
-  as.character()
-
-keepSamples <- sampleDataModified$sample[!(sampleDataModified$sample %in% lowReadSamples)]
-
-physeqTrimmed <- physeqMerged %>% 
-  prune_samples(samples = as.character(keepSamples)) %>% 
-  RemoveMissingTaxa()
-
-physeqTrimmed # 942 taxa x 207 samples
-```
-
-**By Clustering:**
-
-```{r subtset-physeqTrimmed}
-sampleDataTrimmed <- as(sample_data(physeqTrimmed), "data.frame")
+```{r subset-physeqBacteria-by-week, include=FALSE}
+sampleDataBacteria <- as(sample_data(physeqBacteria), "data.frame")
 
 weeks = list("Week 0" = "week_0", "Week 3" = "week_3",
              "Week 5" = "week_5", "Week 9" = "week_9",
@@ -180,175 +80,7 @@ sampleNameList <- pmap(.l = list(currWeek = weeks),
                        .f = function(df, currWeek) {
                          samples <- df %>% filter(week == currWeek) %>% 
                            pull(sample) %>% as.character()},
-                       df = sampleDataTrimmed)
-
-subsetPhyseqTrimmedList <- pmap(.l = list(sampleGroup = sampleNameList),
-                                .f = function(psObj, sampleGroup) {
-                                  psSub <- psObj %>% 
-                                    prune_samples(samples = sampleGroup) %>% 
-                                    RemoveMissingTaxa()},
-                                psObj = physeqTrimmed)
-
-```
-
-
-```{r mds-bray-reactive}
-inputPanel(
-  # select week
-  selectInput(inputId = "brayPlotWeek", 
-              label = "Week", 
-              choices = names(weeks)),
-  # select whether to include sample names as labels on the plot
-  checkboxInput(inputId = "showMDSLabels", 
-                label = "Show point labels",
-                value = FALSE),
-  # select whether to include norm-type confidence ellipses on plot
-  checkboxInput(inputId = "showMDSEllipses",
-                label = "Show confidence ellipses",
-                value = TRUE)
-)
-
-# calculate ordination in response to week selection
-CalculateBrayOrdination <- reactive({
-  withProgress(message = "Calculating Bray Ordination...", value = 1, {
-    set.seed(15651876)
-    ordBray <- ordinate(subsetPhyseqTrimmedList[[input$brayPlotWeek]], 
-                        method = "MDS", distance = "bray")
-  })
-})
-
-# draw plot for selected week
-
-renderPlot({
-  basePlot <- plot_ordination(
-    isolate(subsetPhyseqTrimmedList[[input$brayPlotWeek]]),
-    ordination = CalculateBrayOrdination(),
-    color = "group",
-    shape = "group") +
-    scale_shape_manual(values = c(15, 16, 17, 18)) +
-    theme_bw() +
-    theme(legend.title = element_text(size = 18),
-          legend.text = element_text(size = 16),
-          axis.title.x = element_text(size = 14),
-          axis.title.y = element_text(size = 14),
-          axis.text.x = element_text(size = 12),
-          axis.text.y = element_text(size = 12)) +
-    geom_point(size = 4.5, alpha = 0.9)
-  
-  if (input$showMDSLabels) {
-    basePlot <- basePlot + 
-      geom_text_repel(aes_string(label = "sample"),
-                      color = "grey30", size = 4)
-  }
-  
-  if(input$showMDSEllipses == TRUE) {
-    basePlot <- basePlot + stat_ellipse(type = "norm")
-  }
-  
-  basePlot
-  
-}, height = 600, width = 900)
-
-```
-
-Outliers by clustering are not obvious, and no samples will be removed here.
-
-<br>
-
-#### **Read Distributions**
-
-```{r numReadsStats}
-summary(sampleDataTrimmed$num_reads)
-```
-
-Read counts for combined cohorts after outlier removal range from 4,214 to 14,955 reads per sample, with an average of 8,685 reads per sample.
-
-```{r readDistribution, fig.width=9, fig.height=6}
-# histogram showing distribution of read counts
-readDistPlot <- ggplot(sampleDataTrimmed,
-                       aes(x = num_reads, fill = group)) +
-  geom_histogram(color = "black", binwidth = 1000) +
-  stat_bin(binwidth = 1000, geom = "text", size = 3.5,
-           aes(label = ..count..),
-           position = position_stack(vjust = 0.5)) +
-  ggtitle("Read Distribution") +
-  xlab("Number of Reads") +
-  ylab("Number of Samples") +
-  theme_bw() +
-  theme(plot.title = element_text(hjust = 0.5))
-readDistPlot
-```
-
-Also checking average reads by treatment over each week to make sure significant differences in read counts across treatment groups don't already exist due a technical problem.
-
-<br>
-
-**Average Reads by Treatment by Week:**
-
-```{r average-reads-by-condition, fig.width=9, fig.height=6}
-avgReadsByCondPlot <- ggplot(sampleDataTrimmed,
-                             aes(x = group, y = num_reads,
-                                 fill = group)) +
-  facet_wrap("~ week") +
-  geom_boxplot(outlier.shape = NA) +
-  geom_jitter(width = 0.2) +
-  ylab("Reads per Sample") +
-  ggtitle("Average Reads per Treatment, Faceted by Week") +
-  theme_pubr() +
-  theme(plot.title = element_text(hjust = 0.5),
-        axis.text.x = element_blank(),
-        axis.title.x = element_blank()) +
-  stat_compare_means(method = "kruskal.test", label.x.npc = 0.3, 
-                     label.y.npc = 0.9, size = 3.5)
-avgReadsByCondPlot
-```
-
-<br>
-
-#### **Taxa Filtering**
-
-Non-bacterial taxa need to be removed from the data set for further analysis.
-
-```{r filter-non-bacterial, results='hide'}
-# originally 942 x 207
-physeqBacteria <- physeqTrimmed %>% 
-  subset_taxa(Kingdom == "Bacteria" & Phylum != "Cyanobacteria/Chloroplast")
-
-# did this deplete any samples?
-any(sample_sums(physeqBacteria) == 0)
-
-physeqBacteria # 906 x 207
-```
-
-Removal of non-bacterial taxa has dropped the total taxa count from 942 to 906.
-
-```{r save-physeq-bacteria-for-lefse, eval=FALSE, include=FALSE}
-saveRDS(physeqBacteria, "../data/physeqObjects/physeqBacteria_crps_combined_cohort.RDS")
-```
-
-Checking the prevalence and abundance values of different bacterial families to see if there are any low abundance/prevalence taxa.
-
-```{r phylaPrevalence, fig.width=9, fig.height=6}
-phylaPrevalence <- TaxRankPrevalence(physeqBacteria, "Phylum")
-phylaPrevalence$prevalence_table
-
-phylaPrevalencePlot <- ggplot(phylaPrevalence$prevalence_df,
-                              aes(x = TotalAbundance,
-                                  y = Prevalence/nsamples(physeqBacteria),
-                                  color = Family)) +
-  geom_hline(yintercept = 1/207, alpha = 0.5, linetype = 2) +
-  geom_point(size = 3, alpha = 0.7) +
-  scale_x_log10() +
-  xlab("Total Abundance") +
-  ylab("Prevalence [Frac. Samples]") +
-  facet_wrap(~ Phylum) +
-  theme_bw() +
-  theme(legend.position = "none",
-        plot.title = element_text(hjust = 0.5),
-        plot.subtitle = element_text(hjust = 0.5)) +
-  ggtitle("Phylum Prevalence in All Samples",
-          subtitle = "Colored by Familiy")
-phylaPrevalencePlot
+                       df = sampleDataBacteria)
 ```
 
 ### **16S Analysis: 4 Groups**
