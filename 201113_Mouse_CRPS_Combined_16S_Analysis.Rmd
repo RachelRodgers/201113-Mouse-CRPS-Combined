@@ -565,6 +565,43 @@ renderPlot({
 }, height = 600, width = 900)
 ```
 
+```{r static-ordination, eval=FALSE, echo=FALSE, fig.width=9, fig.height=6}
+set.seed(20097511)
+
+allOrdObj <- map(subsetPhyseqBacteriaList,
+                 ~ ordinate(.x, method = "PCoA", distance = "unifrac"))
+
+OrdPlot <- function(physeqObj, ordObj) {
+  plot_ordination(physeq = physeqObj, ordination = ordObj, 
+                  color = "condition", shape = "condition") +
+    theme_bw() +
+    scale_color_manual(values = c("slateblue3", "firebrick1"),
+                       name = "Treatment") +
+    scale_shape_discrete(name = "Treatment") +
+    theme(legend.text = element_text(size = 12),
+          axis.title = element_text(size = 10),
+          axis.text = element_text(size = 10),
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank()) +
+    geom_point(size = 2) + 
+    stat_ellipse(type = "norm")
+}
+
+allOrdPlots <- pmap(.l = list(physeqObj = subsetPhyseqBacteriaList,
+                              ordObj = allOrdObj),
+                    .f = OrdPlot)
+
+ggarrange(plotlist = allOrdPlots, labels = names(subsetPhyseqBacteriaList),
+          ncol = 2, nrow = 3, common.legend = TRUE, 
+          legend = "right",font.label = list(face = "plain", size = 10),
+          hjust = -1.5, vjust = 2)
+
+
+set.seed(20097511)
+adonisValues <- map(subsetPhyseqBacteriaList, 
+                    ~ RunAdonis(.x, category = "Treatment", distance = "unifrac"))
+```
+
 **ADONIS Results for selected Week and Distance Measure:**
 
 ADONIS is used to determine whether clustering on the PCoA plot is significant based on condition.

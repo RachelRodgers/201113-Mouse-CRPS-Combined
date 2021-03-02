@@ -6,6 +6,8 @@ output:
   html_document:
       code_folding: hide
 runtime: shiny
+editor_options:
+    chunk_output_type: console
 ---
 
 ```{r setup, include=FALSE}
@@ -67,6 +69,11 @@ physeqBacteria <- rarefy_even_depth(physeqBacteriaNonRare, rngseed = 54043710)
 # rarefying dropped 290 taxa; reads dropped to 4,204
 physeqBacteria # 877 x 207
 ```
+
+```{r save-rarefied-data, eval=FALSE}
+saveRDS(physeqBacteria, "../data/physeqObjects/physeqBacteria_rare.RDS")
+```
+
 
 ```{r subset-physeqBacteria-by-week, include=FALSE}
 sampleDataBacteria <- as(sample_data(physeqBacteria), "data.frame")
@@ -493,6 +500,76 @@ renderPlot({
   basePlot
   
 }, height = 600, width = 900)
+```
+
+```{r static-ordination-weighted, eval=FALSE, echo=FALSE, fig.width=9, fig.height=6}
+set.seed(10890127)
+
+allOrdObj <- map(subsetPhyseqBacteriaList,
+                 ~ ordinate(.x, method = "PCoA", distance = "wunifrac"))
+
+OrdPlot <- function(physeqObj, ordObj) {
+  plot_ordination(physeq = physeqObj, ordination = ordObj, 
+                  color = "condition", shape = "condition") +
+    theme_bw() +
+    scale_color_manual(values = c("slateblue3", "firebrick1")) +
+    theme(legend.text = element_text(size = 12),
+          axis.title = element_text(size = 10),
+          axis.text = element_text(size = 10),
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank()) +
+    geom_point(size = 2) + 
+    stat_ellipse(type = "norm")
+}
+
+allOrdPlots <- pmap(.l = list(physeqObj = subsetPhyseqBacteriaList,
+                              ordObj = allOrdObj),
+                    .f = OrdPlot)
+
+ggarrange(plotlist = allOrdPlots, labels = names(subsetPhyseqBacteriaList),
+          ncol = 2, nrow = 3, common.legend = TRUE, 
+          legend = "right",font.label = list(face = "plain", size = 10),
+          hjust = -1.5, vjust = 2)
+
+
+set.seed(10890127)
+adonisValues <- map(subsetPhyseqBacteriaList, 
+                    ~ RunAdonis(.x, category = "condition", distance = "wunifrac"))
+```
+
+```{r static-ordination-unweighted, eval=FALSE, echo=FALSE, fig.width=9, fig.height=6}
+set.seed(10890127)
+
+allOrdObj <- map(subsetPhyseqBacteriaList,
+                 ~ ordinate(.x, method = "PCoA", distance = "unifrac"))
+
+OrdPlot <- function(physeqObj, ordObj) {
+  plot_ordination(physeq = physeqObj, ordination = ordObj, 
+                  color = "condition", shape = "condition") +
+    theme_bw() +
+    scale_color_manual(values = c("slateblue3", "firebrick1")) +
+    theme(legend.text = element_text(size = 12),
+          axis.title = element_text(size = 10),
+          axis.text = element_text(size = 10),
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank()) +
+    geom_point(size = 2) + 
+    stat_ellipse(type = "norm")
+}
+
+allOrdPlots <- pmap(.l = list(physeqObj = subsetPhyseqBacteriaList,
+                              ordObj = allOrdObj),
+                    .f = OrdPlot)
+
+ggarrange(plotlist = allOrdPlots, labels = names(subsetPhyseqBacteriaList),
+          ncol = 2, nrow = 3, common.legend = TRUE, 
+          legend = "right",font.label = list(face = "plain", size = 10),
+          hjust = -1.5, vjust = 2)
+
+
+set.seed(10890127)
+adonisValues <- map(subsetPhyseqBacteriaList, 
+                    ~ RunAdonis(.x, category = "condition", distance = "unifrac"))
 ```
 
 **ADONIS Results for selected Week and Distance Measure:**
