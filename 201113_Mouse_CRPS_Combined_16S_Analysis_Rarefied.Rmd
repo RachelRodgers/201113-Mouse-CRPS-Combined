@@ -56,8 +56,8 @@ Analyzed:
   * treatment 2
 
 2. Comparison between combined cohorts by week:
-  * combined controls</li>
-  * combined treatments</li>
+  * combined controls
+  * combined treatments
 
 3. Comparison within combined cohorts (across weeks)
 

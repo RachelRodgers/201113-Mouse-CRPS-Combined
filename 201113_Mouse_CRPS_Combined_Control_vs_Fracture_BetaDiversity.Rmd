@@ -1,0 +1,284 @@
+---
+title: "Mouse CRPS Beta Diversity Control vs Fracture (Combined Cohorts, Rarefied)"
+author: "Rachel Rodgers"
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+output: 
+  html_document:
+      code_folding: hide
+runtime: shiny
+editor_options:
+    chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(fig.width=8,
+                      fig.height=6)
+```
+
+```{r load-libraries}
+library("tidyverse")
+library("shiny")
+library("phyloseq")
+library("gridExtra")
+library("plotly")
+library("ggrepel")
+library("ggpubr")
+library("scales")
+library("plyr")
+library("gridExtra")
+library("vegan")
+library("randomcoloR")
+library("cluster")
+library("car")
+library("ape")
+#library("aPCoA")
+
+source("./shared_R_scripts/Helper_Functions.R")
+
+options(shiny.sanitize.errors = FALSE)
+```
+
+## Overview
+
+---
+
+Analysis of beta diversity in control versus fracture mice at each time point,
+including cage as a covariate using "Covariate Adjusted Principal Coordinates
+Analysis" (aPCoA). Please see [the aPCoA paper](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC7332564/).
+This is rarefied data from the combined mouse CRPS cohort 1 (190809) and
+cohort 2 (201019).
+
+---
+
+### Subset Data by Week
+
+```{r subset-physeq-by-week}
+physeqBacteria <- readRDS("../data/physeqObjects/physeqBacteria_rare.RDS")
+
+# subset physeqBacteria by week
+sampleDataBacteria <- as(sample_data(physeqBacteria), "data.frame")
+
+weeks = list("Week 0" = "week_0", "Week 3" = "week_3",
+             "Week 5" = "week_5", "Week 9" = "week_9",
+             "Week 16" = "week_16")
+
+# Pull the sample names for each week so physeq object can be subsetted
+sampleNameList <- pmap(.l = list(currWeek = weeks),
+                       .f = function(df, currWeek) {
+                         samples <- df %>% filter(week == currWeek) %>% 
+                           pull(sample) %>% as.character()},
+                       df = sampleDataBacteria)
+
+physeqSubset <- pmap(.l = list(sampleGroup = sampleNameList),
+                     .f = function(psObj, sampleGroup) {
+                       psSub <- psObj %>%
+                         prune_samples(samples = sampleGroup) %>%
+                         RemoveMissingTaxa()},
+                     psObj = physeqBacteria)
+
+# Pull the sample data from each physeq subset
+sampleDataSubset <- map(.x = physeqSubset,
+                        .f = ~ as(sample_data(.), "data.frame"))
+```
+
+```{r week0-test, eval=FALSE, include=FALSE}
+# trying with ordinate
+set.seed(10890127)
+unifracDist <- as.data.frame(
+  as.matrix(UniFrac(physeqSubset$`Week 0`, weighted = TRUE)))
+# aPCoA can't handle data frames with extra data
+sampleData0 <- as(sample_data(physeqSubset$`Week 0`), "data.frame")
+
+result <- aPCoA(formula = unifracDist ~ cage_num,
+                data = sampleData0, maincov = "condition", drawCenter = FALSE)
+```
+
+```{r function-definitions}
+# ellipseYS() and code within CalculateEigen() are taken directly from the
+#   aPCoA_1.3.tar.gz package downloaded from CRAN on 4/25/2023. The main
+#   aPCoA function has been modified to calculate eigen values needed for 
+#   making the adjusted PCoA plot, which I've re-written to be done in ggplot2.
+
+ellipseYS <- function(center, shape, radius) {
+  segments<-51
+  if (! (is.vector(center) && 2==length(center))) stop("center must be a vector of length 2")
+  if (! (is.matrix(shape) && all(2==dim(shape)))) stop("shape must be a 2 by 2 matrix")
+  if (max(abs(shape - t(shape)))/max(abs(shape)) > 1e-10) stop("shape must be a symmetric matrix")
+  angles <- (0:segments)*2*pi/segments 
+  unit.circle <- cbind(cos(angles), sin(angles)) 
+  #	ellipse <- t(center + radius*t(unit.circle %*% chol(shape,pivot=TRUE))) 
+  Q <- chol(shape, pivot=TRUE)
+  order <- order(attr(Q, "pivot"))
+  ellipse <- t( center + radius*t( unit.circle %*% Q[,order]))
+  colnames(ellipse) <- c("x", "y")
+  ellipse
+}
+
+CalculateEigen <- function(formula, data) {
+  
+  Terms <- terms(formula, data = data) # "~" "unifracDist" "cage_num"
+  lhs <- formula[[2]] # unifracDist object
+  lhs <- eval(lhs, data, parent.frame())
+  formula[[2]] <- NULL
+  rhs.frame <- model.frame(formula, data, drop.unused.levels = TRUE)
+  rhs <- model.matrix(formula, rhs.frame)
+
+  grps <- attr(rhs, "assign")
+  qrhs <- qr(rhs)
+  rhs <- rhs[, qrhs$pivot, drop = FALSE]
+  rhs <- rhs[, 1:qrhs$rank, drop = FALSE]
+  grps <- grps[qrhs$pivot][1:qrhs$rank]
+  u.grps <- unique(grps)
+  nterms <- length(u.grps) - 1
+  if (nterms < 1) 
+    stop("right-hand-side of formula has no usable terms")
+  
+  dmat <- as.matrix(lhs^2) # distance matrix (unifracDist obj as matrix)
+
+  X<-rhs
+  y<-lhs # distance mtx
+
+  X<-X[rownames(dmat),]
+  X<-as.matrix(X[,-1],nrow=nrow(X))
+
+  H<-X%*%solve(t(X)%*%X)%*%t(X)
+
+  A<--1/2*as.matrix(y)^2
+  J<-diag(nrow(X))-matrix(rep(1/(nrow(X)),length(A)),nrow=nrow(A))
+  E<-(diag(nrow(H))-H)%*%J%*%A%*%J%*%(diag(nrow(H))-H)
+  rownames(E)<-rownames(data)
+  colnames(E)<-rownames(data)
+  
+  # eigen() decomposes the distance matrix
+  eigenE<-eigen(E)$vectors
+  eigenvalue<-eigen(E)$values
+  
+  # tempvector<-as.character(data[,as.character(substitute(maincov))])
+  # if(is.null(col)){
+  #   color1<-distinctColorPalette(length(unique(tempvector)))
+  # }else{
+  #   color1<-col
+  # }
+  # names(color1)<-unique(tempvector)
+  rownames(eigenE)<-rownames(data)
+  # centernames<-unique(tempvector)
+  # centers<-centernames
+
+  # for(i in 1:length(centernames)){
+  #   centers[i]<-rownames(pam(as.matrix(y)[tempvector==centernames[i],
+  #                                    tempvector==centernames[i]], 1)$medoids)
+  # }
+  # newcenters<-centers
+  # for(i in 1:length(centernames)){
+  #   newcenters[i]<-rownames(pam(E[tempvector==centernames[i],
+  #                                 tempvector==centernames[i]], 1)$medoids)
+  # }
+  # 
+  # origpcoa<-pcoa(y)
+
+  
+  
+  eigenInfo <- list("covariateAdjMtx" = E,
+                    "eigenE" = eigenE,
+                    "eigenvalue" = eigenvalue)
+}
+
+# AdjustedPCoAPlot() is my function for plotting the adjusted PCoA plot
+AdjustedPCoAPlot <- function(eigenInfo, sampleData, plotTitle = NULL,
+                             plotSubtitle = NULL) {
+
+  eigenE <- eigenInfo$eigenE
+  eigenvalue <- eigenInfo$eigenvalue
+  
+  # ~ Generate X and Y axis Data ~ #
+  # x-values:
+  xVals <- eigenE[, 1] * eigenvalue[1]^(1/2)
+  # y-values:
+  yVals <- eigenE[, 2] * eigenvalue[2]^(1/2)
+  # put in data frame
+  plottingDF <- data.frame(x_axis = xVals, y_axis = yVals)
+  
+  # ~ Condition Data ~ #
+  conditionLUT <- sampleData %>%
+    select(sample, condition) %>%
+    mutate(across(where(is.factor), as.character)) %>% 
+    deframe()
+  
+  plottingDF <- plottingDF %>%
+    rownames_to_column(var = "sample") %>%
+    mutate(condition = conditionLUT[sample])
+  
+  row.names(plottingDF) <- plottingDF$sample
+  
+  # ~ Shape and Color Values ~ #
+  conditionColors <- c("fracture" = "#FB0106", "control" = "blue")
+  conditionShapes <- c("fracture" = 17, "control" = 19)
+  
+  # ~ ggplot ~ #
+  ordPlot <- ggplot(data = plottingDF,
+                    aes(x = x_axis, y = y_axis, color = condition,
+                        shape = condition)) +
+    geom_point(size = 2) + 
+    ggtitle(plotTitle,
+            subtitle = plotSubtitle) +
+    scale_color_manual(values = conditionColors) +
+    scale_shape_manual(values = conditionShapes) +
+    xlab(paste(round(eigenvalue[1]/sum(eigenvalue)*100,2), "%")) +
+    ylab(paste(round(eigenvalue[2]/sum(eigenvalue)*100,2), "%")) +
+    stat_ellipse(type = "norm", level = 0.95) +
+    theme_bw() +
+    theme(plot.title = element_text(hjust = 0.5),
+          plot.subtitle = element_text(hjust = 0.5),
+          panel.grid = element_blank())
+  
+  ordPlot
+}
+```
+
+```{r test-new-functions, eval=FALSE, include=FALSE}
+# plot
+eigenWeek0 <- CalculateEigen(formula = unifracDist ~ cage_num,
+                             data = sampleData0)
+
+pcoaAdjWeek0 <- AdjustedPCoAPlot(eigenInfo = eigenWeek0,
+                                 sampleData = sampleData0)
+pcoaAdjWeek0
+
+```
+
+### Plot Adjusted PCoA
+
+```{r make-adjusted-pcoa-plots}
+# Calculate weighted unifrac distances on each physeq object:
+set.seed(10890127)
+ufDistList <- map(.x = physeqSubset,
+                   .f = ~ as.data.frame(as.matrix(UniFrac(., weighted = FALSE))))
+
+# Calculate Eigenvalues needed for plotting:
+eigenResList <- map2(.x = ufDistList,
+                     .y = sampleDataSubset,
+                     .f = ~ CalculateEigen(formula = .x ~ cage_num,
+                                           data = .y))
+
+adjPCoAPlotList <- pmap(.l = list(eigenInfo = eigenResList,
+                                  sampleData = sampleDataSubset),
+                        .f = AdjustedPCoAPlot)
+
+adjPCoAPlotList
+```
+
+```{r save-plots, eval=FALSE}
+figDir <- "../analysis/figures/adjusted_PCoA"
+dir.create(figDir)
+
+# arrange plots
+ggarrange(plotlist = adjPCoAPlotList, 
+          labels = names(adjPCoAPlotList),
+          ncol = 2, nrow = 3, common.legend = TRUE, 
+          legend = "right",font.label = list(face = "plain", size = 10),
+          hjust = -1.5, vjust = 2)
+
+# save manually
+```
+
+

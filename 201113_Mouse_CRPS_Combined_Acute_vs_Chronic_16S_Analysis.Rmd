@@ -1,0 +1,163 @@
+---
+title: "Acute vs Chronic CRPS 16S Analysis in Mice (rarefied)"
+author: "Rachel Rodgers"
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+output: 
+  html_document:
+      code_folding: hide
+runtime: shiny
+editor_options:
+    chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(fig.width=8,
+                      fig.height=6,
+                      warning = FALSE,
+                      message = FALSE)
+```
+
+```{r load-libraries, message=FALSE, include=FALSE}
+library("shiny")
+library("phyloseq")
+library("vegan")
+library("gridExtra")
+library("knitr")
+library("DESeq2")
+library("plotly")
+library("microbiome")
+library("data.table")
+library("ggrepel")
+library("ggpubr")
+library("scales")
+library("plyr")
+library("DT")
+library("picante")
+library("gridExtra")
+library("aPCoA")
+library("tidyverse")
+
+source("./shared_R_scripts/Helper_Functions.R")
+
+options(shiny.sanitize.errors = FALSE)
+```
+
+## Overview {.tabset}
+
+---
+
+Analysis of combined mouse CRPS cohorts 1 (190809) and 2 (201019) using rarefied data.
+
+In this script I will be comparing mice with chronic CRPS to mice with acute
+CRPS within timepoints (BL, 3, 5, 9 and 16 weeks).
+
+```{r read-in-data}
+physeqBacteria <- readRDS("../data/physeqObjects/physeqBacteria_rare.RDS")
+```
+
+```{r subset-physeqBacteria-by-week, include=FALSE}
+sampleDataBacteria <- as(sample_data(physeqBacteria), "data.frame")
+
+weeks = list("Week 0" = "week_0", "Week 3" = "week_3",
+             "Week 5" = "week_5", "Week 9" = "week_9",
+             "Week 16" = "week_16")
+
+# Pull the sample names for each week so physeq object can be subsetted
+sampleNameList <- pmap(.l = list(currWeek = weeks),
+                       .f = function(df, currWeek) {
+                         samples <- df %>% filter(week == currWeek) %>% 
+                           pull(sample) %>% as.character()},
+                       df = sampleDataBacteria)
+
+# subset physeqBacteria by week, store in list
+subsetPhyseqBacteriaList <- pmap(.l = list(sampleGroup = sampleNameList),
+                                 .f = function(psObj, sampleGroup) {
+                                   psSub <- psObj %>%
+                                     prune_samples(samples = sampleGroup) %>%
+                                     RemoveMissingTaxa()},
+                                 psObj = physeqBacteria)
+```
+
+---
+
+## Community Composition
+
+```{r community-composition}
+inputPanel(
+  # select physeq object by week
+  selectInput(inputId = "communityPhyseq", label = "Week:",
+              choices = names(weeks),
+              selected = "Week 0"),
+  # select taxonomic rank
+  selectInput(inputId = "communityRank", label = "Taxonomic Rank:",
+              choices = c("Kingdom", "Phylum", "Class", "Order", "Family",
+                          "Genus", "Species"),
+              selected = "Phylum"),
+  # select abundance filter
+  sliderInput(inputId = "communityAbdFilt", label = "Abundance Filter",
+              min = 0, max = 1, step = 0.05, value = 0),
+  # hide NA?
+  checkboxInput(inputId = "communityHideNA", label = "Hide unnamed taxa", 
+                value = FALSE)
+)
+
+# update
+actionButton(inputId = "updateCommunity", label = "Update Composition Plot",
+             icon = icon("fas fa-sync-alt"))
+
+SelectedPhyseq <- reactive({
+  selectedPhyseq <- input$communityPhyseq
+  if (is.null(selectedPhyseq)) {
+    selectedPhyseq <- "Week 0"
+  }
+  return(selectedPhyseq)
+})
+
+observe({print(SelectedPhyseq())})
+
+CalculateAbundance <- eventReactive(input$updateCommunity, {
+  
+  withProgress(message = "Calculating Abundance...", value = 1, {
+    abdDF <- MakeAbundanceDF(physeq = subsetPhyseqBacteriaList[[SelectedPhyseq()]],
+                             taxRank = input$communityRank,
+                             abundanceFilter = input$communityAbdFilt,
+                             pruneMissing = input$communityHideNA)
+    
+    if (dim(abdDF)[1] == 0) {
+      stop("No taxa meet this filtering criteria. Try lowering the Abundance Filter option.",
+           call. = FALSE)
+      } else {
+        if (input$communityRank == "Species") {
+          abdDF <- mutate(abdDF, "GenusSpecies" = paste(Genus, Species,
+                                                        sep = " "))
+          }
+        }
+    
+    return(abdDF)
+    
+    })
+}, ignoreNULL = FALSE)
+
+
+renderPlotly({
+  compPlot <- PlotCommunityComposition(abdDF = CalculateAbundance(),
+                                       taxRank = ifelse(isolate(input$communityRank) == "Species",
+                                                        yes = "GenusSpecies",
+                                                        no = isolate(input$communityRank)),
+                                       facetFormula = "~ crps_type")
+  
+  ggplotly(compPlot, height = 600, width = 1000)
+})
+```
+
+<br>
+<br>
+<br>
+<br>
+<br>
+<br>
+<br>
+<br>
+<br>
+<br>
+<br>
