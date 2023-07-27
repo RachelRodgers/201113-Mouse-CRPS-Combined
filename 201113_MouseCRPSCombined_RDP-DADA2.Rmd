@@ -203,7 +203,7 @@ saveRDS(ps0.hitdb, "../data/physeqObjects/ps0.hitdb_single.RDS")
 ```{r save-data}
 save.image("201113_Mouse_CRPS_Combined_dada2_Pathogen_Server.RData") # read back w/ load() or attach()
 writeLines(capture.output(sessionInfo()), 
-           "201113_Mouse_CRPS_Combined_dada2_Pathogen_Server_session_info.txt")
+           "201113_MouseCRPSCombined_RDP-DADA2_Pathogen_Server_session_info.txt")
 Sys.Date()
 getwd()
 sessionInfo()

@@ -1,0 +1,55 @@
+R version 4.0.5 (2021-03-31)
+Platform: x86_64-pc-linux-gnu (64-bit)
+Running under: CentOS Linux 7 (Core)
+
+Matrix products: default
+BLAS/LAPACK: /usr/lib64/libopenblas-r0.3.3.so
+
+locale:
+ [1] LC_CTYPE=en_US.UTF-8       LC_NUMERIC=C               LC_TIME=en_US.UTF-8       
+ [4] LC_COLLATE=en_US.UTF-8     LC_MONETARY=en_US.UTF-8    LC_MESSAGES=en_US.UTF-8   
+ [7] LC_PAPER=en_US.UTF-8       LC_NAME=C                  LC_ADDRESS=C              
+[10] LC_TELEPHONE=C             LC_MEASUREMENT=en_US.UTF-8 LC_IDENTIFICATION=C       
+
+attached base packages:
+[1] stats4    parallel  stats     graphics  grDevices utils     datasets  methods   base     
+
+other attached packages:
+ [1] forcats_0.5.1       stringr_1.4.0       dplyr_1.0.9         purrr_0.3.4         readr_2.1.2        
+ [6] tidyr_1.2.0         tibble_3.1.8        ggplot2_3.3.6       phyloseq_1.34.0     phangorn_2.7.1     
+[11] ape_5.5             msa_1.22.0          Biostrings_2.58.0   XVector_0.30.0      IRanges_2.24.1     
+[16] S4Vectors_0.28.1    BiocGenerics_0.36.1 dada2_1.18.0        Rcpp_1.0.9         
+
+loaded via a namespace (and not attached):
+ [1] googledrive_2.0.0           colorspace_2.0-1            deldir_0.2-10              
+ [4] hwriter_1.3.2.1             ellipsis_0.3.2              GenomicRanges_1.42.0       
+ [7] fs_1.5.2                    rstudioapi_0.13             farver_2.1.0               
+[10] fansi_0.5.0                 codetools_0.2-18            splines_4.0.5              
+[13] knitr_1.39                  ade4_1.7-16                 jsonlite_1.7.2             
+[16] Rsamtools_2.6.0             broom_1.0.0                 cluster_2.1.2              
+[19] dbplyr_2.2.1                png_0.1-7                   compiler_4.0.5             
+[22] backports_1.4.1             assertthat_0.2.1            Matrix_1.3-3               
+[25] gargle_1.2.0                cli_3.3.0                   prettyunits_1.1.1          
+[28] tools_4.0.5                 igraph_1.2.6                gtable_0.3.0               
+[31] glue_1.6.2                  GenomeInfoDbData_1.2.4      reshape2_1.4.4             
+[34] ShortRead_1.48.0            fastmatch_1.1-3             Biobase_2.50.0             
+[37] cellranger_1.1.0            vctrs_0.4.1                 rhdf5filters_1.2.1         
+[40] multtest_2.46.0             nlme_3.1-152                iterators_1.0.13           
+[43] xfun_0.31                   lifecycle_1.0.1             googlesheets4_1.0.0        
+[46] zlibbioc_1.36.0             MASS_7.3-54                 scales_1.1.1               
+[49] hms_1.1.0                   MatrixGenerics_1.2.1        SummarizedExperiment_1.20.0
+[52] biomformat_1.18.0           rhdf5_2.34.0                RColorBrewer_1.1-2         
+[55] yaml_2.2.1                  latticeExtra_0.6-30         stringi_1.7.8              
+[58] foreach_1.5.1               permute_0.9-5               BiocParallel_1.24.1        
+[61] GenomeInfoDb_1.26.7         rlang_1.0.4                 pkgconfig_2.0.3            
+[64] matrixStats_0.58.0          bitops_1.0-7                lattice_0.20-44            
+[67] Rhdf5lib_1.12.1             labeling_0.4.2              GenomicAlignments_1.26.0   
+[70] tidyselect_1.1.1            plyr_1.8.6                  magrittr_2.0.1             
+[73] R6_2.5.0                    generics_0.1.0              DelayedArray_0.16.3        
+[76] DBI_1.1.3                   pillar_1.8.0                haven_2.5.0                
+[79] withr_2.5.0                 mgcv_1.8-35                 survival_3.2-11            
+[82] RCurl_1.98-1.8              crayon_1.5.1                interp_1.1-3               
+[85] utf8_1.2.1                  tzdb_0.3.0                  jpeg_0.1-9                 
+[88] progress_1.2.2              grid_4.0.5                  data.table_1.14.0          
+[91] vegan_2.5-7                 digest_0.6.27               RcppParallel_5.1.5         
+[94] munsell_0.5.0               quadprog_1.5-8             

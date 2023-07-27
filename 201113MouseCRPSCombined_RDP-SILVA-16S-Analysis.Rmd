@@ -1,0 +1,1140 @@
+---
+title: "Reanalysis of 201113 Mouse CRPS Combined: 16S Analysis"
+author: "Rachel Rodgers"
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+output: 
+  html_document:
+      code_folding: hide
+runtime: shiny
+---
+
+```{r for-shinyapps.io-deployment, eval=FALSE, include=FALSE}
+library(BiocManager)
+options(repos = BiocManager::repositories())
+```
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(fig.width=8,
+                      fig.height=6,
+                      warning = FALSE,
+                      message = FALSE)
+```
+
+```{r load-libraries, message=FALSE, include=FALSE}
+library("shiny")
+library("phyloseq")
+library("vegan")
+library("gridExtra")
+library("knitr")
+library("DESeq2")
+library("plotly")
+library("microbiome")
+library("data.table")
+library("ggrepel")
+library("ggpubr")
+library("scales")
+library("plyr")
+library("DT")
+library("picante")
+library("tidyverse")
+
+source("./shared_R_scripts/Helper_Functions.R")
+source("./shared_R_scripts/BoxPlotHelpers.R")
+source("./shared_R_scripts/BiomarkerHelpers.R")
+
+options(shiny.sanitize.errors = FALSE)
+```
+
+## Overview {.tabset}
+
+This is a 16S analysis of CRPS mice, combined cohorts 1 (190809_Lara_16S) and 2
+(201019_LaraC_V4_Mouse_Human_CRPS). Both RDP-annotated taxonomy and SILVA-annotated
+taxonomy will be investigated. Fracture and control mice will be compared at 
+each time point.
+
+This data set contains 212 samples. Annotation with RDP resulted in 947 ASVs and
+annotation with SILVA resulted in 936 ASVs.
+
+```{r physeqObjects, results='hide'}
+physeqRawRDP <- readRDS("../data/RDataObjects/physeqObjects/ps0.rdp_single.RDS")
+physeqRawRDP # 947 x 212
+
+physeqRawSILVA <- readRDS("../data/RDataObjects/physeqObjects/ps0.silvaNR99v138.1_single.RDS")
+physeqRawSILVA # 936 x 212
+```
+
+```{r sampleDataModified}
+sampleData <- read.delim("../data/metadata/201113_Mouse_CRPS_combinedMetadata.txt",
+                         stringsAsFactors = FALSE, check.names = FALSE)
+
+sampleDataModified <- sampleData %>% 
+  # edit caging information
+  mutate(cage_num = paste("cage", str_extract(cage, "[:digit:]"),
+                          sep = "_"),
+         cage_num = case_when(cage == "MB1" ~ "cage_7",
+                              cage == "MB2" ~ "cage_8",
+                              cage == "MB3" ~ "cage_9",
+                              cage == "MB4" ~ "cage_10",
+                              TRUE ~ cage_num),
+         group = paste(cohort, condition, sep = "_"),
+         cage_cohort = paste(cohort, cage, sep = "_")) %>% 
+  rename(rdp_sample_name = sample) %>% 
+  # for silva, prepend the string Baldridge to the sample name
+  mutate(silva_sample_name = ifelse(!grepl("^Baldridge", rdp_sample_name),
+                                    yes = paste("Baldridge", rdp_sample_name,
+                                                sep = "_"),
+                                    no = rdp_sample_name))
+
+# edit factor levels
+sampleDataModified$cohort <- factor(sampleDataModified$cohort,
+                                    levels = c("cohort_1", "cohort_2"))
+sampleDataModified$condition <- factor(sampleDataModified$condition,
+                                       levels = c("control", "fracture"))
+sampleDataModified$crps_type <- factor(sampleDataModified$crps_type,
+                                       levels = c("control", "baseline", 
+                                                  "acute", "chronic"))
+sampleDataModified$week <- factor(sampleDataModified$week,
+                                  levels = c("week_0", "week_3", "week_5",
+                                             "week_9", "week_16"))
+
+# add readsPerSample
+readsPerSampleRDP <- sample_sums(physeqRawRDP)
+readsPerSampleSILVA <- sample_sums(physeqRawSILVA)
+
+sampleDataModified <- sampleDataModified %>% 
+  mutate(rdp_reads_per_sample = readsPerSampleRDP[rdp_sample_name],
+         silva_reads_per_sample = readsPerSampleSILVA[silva_sample_name])
+```
+
+```{r merge-phyloseq, results='hide'}
+#----- RDP -----#
+sampleDataRDP <- sampleDataModified
+row.names(sampleDataRDP) <- sampleDataModified$rdp_sample_name
+physeqMergedRDP <- merge_phyloseq(sample_data(sampleDataRDP),
+                                  physeqRawRDP)
+physeqMergedRDP # 947 x 212
+
+#----- SILVA -----#
+sampleDataSILVA <- sampleDataModified
+row.names(sampleDataSILVA) <- sampleDataModified$silva_sample_name
+physeqMergedSILVA <- merge_phyloseq(sample_data(sampleDataSILVA),
+                                    physeqRawSILVA)
+physeqMergedSILVA # 936 x 212
+
+numReadsColList <- list("rdp" = "rdp_reads_per_sample",
+                        "silva" = "silva_reads_per_sample")
+
+sampleNameColList <- list("rdp" = "rdp_sample_name",
+                          "silva" = "silva_sample_name")
+```
+
+```{r set-custom-color-shapes}
+conditionColors <- c("control" = "blue", "fracture" = "#FB0106")
+conditionShapes <- c("control" = 16, "fracture" = 17)
+```
+
+### **QC**
+
+<br>
+
+#### **Taxa Filtering**
+
+Non-bacterial taxa need to be removed from the data set prior to further analysis.
+The RDP data set contains taxa from the Phylum Cyanobacteria/Chloroplast, while 
+the SILVA data contains taxa from the Kingdom Archaea and the Phylum Cyanobacteria.
+Those taxa will be removed here.
+
+```{r filter-non-bacterial, results='hide'}
+# RDP
+physeqBacteriaRDP <- physeqMergedRDP %>% 
+  subset_taxa(Kingdom == "Bacteria" & Phylum != "Cyanobacteria/Chloroplast")
+physeqBacteriaRDP # 911 x 212
+
+# SILVA
+physeqBacteriaSILVA <- physeqMergedSILVA %>% 
+  subset_taxa(Kingdom == "Bacteria" & Phylum != "Cyanobacteria")
+physeqBacteriaSILVA
+```
+
+Removal of non-bacterial taxa from the RDP data set reduces the total number of
+taxa from 947 to 911. In the SILVA data, total taxa are reduced from 936 to 933.
+
+```{r physeqList}
+# store the physeq objects in a list
+physeqList <- list("rdp" = physeqBacteriaRDP,
+                   "silva" = physeqBacteriaSILVA)
+```
+
+---
+
+#### **Sample Outlier Removal**
+
+<br>
+
+**By unexpected read count:**
+
+Checking the average read count across all samples to determine if any samples have unexpected numbers of reads.
+
+```{r avgReads}
+avgReadsPlots <- pmap(.l = list(yVar = list("rdp" = "rdp_reads_per_sample",
+                                            "silva" = "silva_reads_per_sample"),
+                                plotTitle = list("rdp" = "RDP",
+                                                 "silva" = "SILVA")),
+                      .f = PrettyBox,
+                      df = sampleDataModified, xVar = "condition",
+                      statMethod = "kruskal.test", colorVals = conditionColors)
+
+# Add low-read threshold, label samples falling below
+FixPlot <- function(basePlot, lowReadThresh, sampleNameCol, numReadsCol) {
+  basePlot +
+    geom_hline(yintercept = lowReadThresh, lty = "dashed") +
+    geom_text_repel(aes(label = paste(!!sym(sampleNameCol),
+                        ": ", !!sym(numReadsCol))),
+                    data = filter(sampleDataModified,
+                                  !!sym(numReadsCol) <= lowReadThresh))
+}
+
+avgReadsPlotsModified <- pmap(.l = list(basePlot = avgReadsPlots,
+                                        sampleNameCol = sampleNameColList,
+                                        numReadsCol = numReadsColList),
+                              .f = FixPlot,
+                              lowReadThresh = 1000)
+
+avgReadsPlotsArr <- annotate_figure(ggarrange(plotlist = avgReadsPlotsModified,
+                                              ncol = 2, nrow = 1),
+                                    top = text_grob("Avg. Reads per Sample All Weeks Combined",
+                                                    size = 14),
+                                    left = "Average Reads", bottom = "Condition")
+avgReadsPlotsArr
+```
+
+Analysis will benefit from the removal the uninformative, low-read samples 
+(rdp # reads/ silva # reads):
+
+  * BL-982: 943/947 reads
+  * BL-985: 1/1 read
+  * BL-984: 0/0 reads
+  * Baldridge_9: 3/3 reads
+  * Baldridge_62: 2/2 reads
+  
+```{r trim-physeq, results='hide'}
+RemoveLowReadSamples <- function(df, physeq, numReadsCol, sampleNameCol,
+                                 lowReadThresh = 1000) {
+  # get the names of the samples that exceed threshold
+  keepSamples <- df %>% 
+    filter(!!sym(numReadsCol) > lowReadThresh) %>% 
+    pull(!!sym(sampleNameCol)) %>% 
+    as.character()
+  
+  # prune out the unwanted samples
+  physeqTrimmed <- physeq %>% 
+    prune_samples(samples = keepSamples) %>% 
+    RemoveMissingTaxa()
+  
+}
+
+physeqListTrimmed <- pmap(.l = list(physeq = physeqList,
+                                    numReadsCol = numReadsColList,
+                                    sampleNameCol = sampleNameColList),
+                          .f = RemoveLowReadSamples,
+                          df = sampleDataModified)
+physeqListTrimmed
+
+# extract sample data from the trimmed physeq objects
+sampleDataTrimmed <- map(.x = physeqListTrimmed,
+                         .f = ~ as(sample_data(.x), "data.frame"))
+```
+
+Removing these low read samples has decreased the total number of taxa in the
+RDP from 911 to 906, and in the SILVA data from 933 to 928.
+
+<br>
+
+#### **Average Reads by Condition at each Time Point**
+
+<br>
+
+Now checking to see if the average number of reads by Condition varies significantly
+at each time point. A significant difference in read counts between the control
+and fracture groups could influence statistical results.
+
+```{r avgReadsByWeek, fig.width=11, fig.height=8.5}
+avgReadsByWeekPlots <- pmap(.l = list(df = sampleDataTrimmed,
+                                      yVar = numReadsColList,
+                                      plotTitle = list("rdp" = "Avg. Reads by Condition & Week (RDP)",
+                                                       "silva" = "Avg. Reads by Condition & Week (SILVA)")),
+                            .f = PrettyBox,
+                            xVar = "condition", statMethod = "wilcox.test",
+                            colorVals = conditionColors, 
+                            label_x = "Condition", label_y = "Reads per Sample",
+                            facet_formula = "~ week", 
+                            facet_rows = 3, facet_cols = 2)
+avgReadsByWeekPlots
+```
+
+When comparing the average reads between the fracture and control group at each
+week, there is a significant difference between read counts at week 5 
+for both the RDP (p = 0.047) and SILVA (p = 0.044).
+
+---
+
+<br>
+
+#### **Rarefy Data**
+
+<br>
+
+The data will be rarefied to help with the significant difference in average reads
+between fracture and control groups.
+
+```{r physeqListRare, results='hide'}
+physeqListRare <- map(.x = physeqListTrimmed,
+                      .f = ~ rarefy_even_depth(.x, 
+                                               rngseed = 30154269))
+physeqListRare
+
+sampleDataRare <- map(.x = physeqListRare,
+                      .f = ~ as(sample_data(.x), "data.frame"))
+```
+
+Rarefying the data has reduced the total number of taxa in the RDP data set 
+from 906 to 881, and in the SILVA data set from 928 to 907.
+
+```{r save-physeq-objects-for-RF, include=FALSE, eval=FALSE}
+saveRDS(physeqListRare$rdp,
+        file = "../data/RDataObjects/physeqObjects/physeqRareRDP.RDS")
+saveRDS(physeqListRare$silva,
+        file = "../data/RDataObjects/physeqObjects/physeqRareSILVA.RDS")
+```
+
+
+```{r subset-physeqListRare-by-week}
+# Subset phyloseq objects within physeqListRare ahead of time
+
+SubsetPhyseqByWeek <- function(weeksVec, sampleDataDF, sampleNameCol,
+                               physeqObj) {
+  
+  physeqSubsetList <- vector(mode = "list", length = length(weeksVec))
+  
+  for (i in 1:length(weeksVec)) {
+
+    currentWeek <- weeksVec[[i]]
+    
+    keepSamples <- sampleDataDF %>% 
+      filter(week == currentWeek) %>% 
+      pull(!!sym(sampleNameCol)) %>% 
+      as.character()
+    
+    currentPSSubset <- physeqObj %>% 
+      prune_samples(samples = keepSamples) %>% 
+      RemoveMissingTaxa()
+    
+    physeqSubsetList[[i]] <- currentPSSubset
+    names(physeqSubsetList)[i] <- currentWeek
+    
+  }
+  
+  return(physeqSubsetList)
+  
+}
+
+weeks <- as.character(sort(unique(sampleDataModified$week)))
+
+physeqSubsetsByWeek <- pmap(.l = list(sampleDataDF = sampleDataRare,
+                                      sampleNameCol = sampleNameColList,
+                                      physeqObj = physeqListRare),
+                            .f = SubsetPhyseqByWeek,
+                            weeksVec = weeks)
+```
+
+---
+
+<br>
+
+#### **Phyla Prevalence**
+
+<br>
+
+Checking the prevalence and abundance of different phyla to help with analyzing
+biomarkers later in the workflow.
+
+```{r phylaPrev}
+phylaPrevRes <- map(.x = physeqListRare,
+                    .f = ~ TaxRankPrevalence(.x, "Phylum"))
+phylaPrevDFList <- map(.x = phylaPrevRes,
+                       .f = ~ .x$prevalence_df)
+
+phylaPrevPlots <- pmap(.l = list(prevDF = phylaPrevDFList,
+                                 physeqObj = physeqListRare,
+                                 myTitle = list("rdp" = "RDP",
+                                                "silva" = "SILVA"),
+                                 intercept_y = list("rdp" = 1/nsamples(physeqListRare$rdp),
+                                                    "silva" = 1/nsamples(physeqListRare$silva))),
+                       .f = PlotPhylaPrevalence)
+
+phylaPrevPlots
+```
+
+<br>
+
+### **Community Composition**
+
+<h3>Community Composition Plots</h3>
+
+```{r community-composition}
+# Control versus Fracture
+# user selects taxonomic rank and week
+
+#----- UI -----#
+fluidRow(
+  column(5,
+         wellPanel(
+           # select taxonomic rank
+           selectInput(inputId = "communityTaxRank",
+                       label = "Taxonomic Rank:",
+                       choices = c("Kingdom", "Phylum", "Class", "Order", 
+                                   "Family", "Genus", "Species"),
+                       selected = "Phylum"),
+           # select week
+           selectInput(inputId = "communityWeek",
+                       label = "Week:",
+                       choices = sort(unique(sampleDataModified$week))),
+           # select abundance filter
+           sliderInput(inputId = "abundanceFilter", label = "Abundance Filter:",
+                       min = 0, max = 1, step = 0.05, value = 0),
+           # hide NA?
+           checkboxInput(inputId = "hideNA", "Hide unnamed taxa", value = FALSE),
+           # update
+           actionButton(inputId = "updateCommunityPlot", 
+                        label = "Update Community Plot", 
+                        icon = icon("fas fa-sync-alt"))
+           )
+         )
+  )
+
+#----- React -----#
+
+# RDP abundance DF
+CalculateAbundanceRDP <- eventReactive(input$updateCommunityPlot, {
+  
+  withProgress(message = "Calculating Abundance...", value = 1, {
+    
+    abdDF <- MakeAbundanceDF(physeq = physeqListRare$rdp,
+                             taxRank = input$communityTaxRank,
+                             abundanceFilter = input$abundanceFilter,
+                             pruneMissing = input$hideNA)
+    
+    if (dim(abdDF)[1] == 0) {
+      stop("No taxa meet this filtering criteria. 
+           Trying lowering the Abundance Filter option.", call. = FALSE)
+    } else {
+      if (input$communityTaxRank == "Species") {
+        abdDF <- abdDF %>% 
+          mutate("GenusSpecies" = paste(Genus, Species, sep = " "))
+      }
+    }
+  })
+  
+  abdDFFiltered <- abdDF %>% 
+    filter(week == input$communityWeek)
+  
+  return(abdDFFiltered)
+  
+}, ignoreNULL = FALSE)
+
+# SILVA abundance DF
+CalculateAbundanceSILVA <- eventReactive(input$updateCommunityPlot, {
+  
+  withProgress(message = "Calculating Abundance...", value = 1, {
+    
+    abdDF <- MakeAbundanceDF(physeq = physeqListRare$silva,
+                             taxRank = input$communityTaxRank,
+                             abundanceFilter = input$abundanceFilter,
+                             pruneMissing = input$hideNA)
+    
+    if (dim(abdDF)[1] == 0) {
+      stop("No taxa meet this filtering criteria. 
+           Trying lowering the Abundance Filter option.", call. = FALSE)
+    } else {
+      if (input$communityTaxRank == "Species") {
+        abdDF <- abdDF %>% 
+          mutate("GenusSpecies" = paste(Genus, Species, sep = " "))
+      }
+    }
+  })
+  
+  abdDFFiltered <- abdDF %>% 
+    filter(week == input$communityWeek)
+  
+  return(abdDFFiltered)
+  
+}, ignoreNULL = FALSE)
+```
+
+<h3>RDP</h3>
+
+```{r render-rdp-community}
+renderPlotly({
+  
+  rdpCompPlot <- PlotCommunityComposition(abdDF = CalculateAbundanceRDP(),
+                                          taxRank = ifelse(isolate(input$communityTaxRank) == "Species",
+                                                           yes = "GenusSpecies",
+                                                           no = isolate(input$communityTaxRank)),
+                                          facetFormula = "~ condition") +
+    ggtitle(isolate(input$communityWeek)) +
+    theme(plot.title = element_text(hjust = 0.5, size = 14))
+  
+  ggplotly(rdpCompPlot, height = 600, width = 1000)
+})
+```
+
+<br>
+<br>
+<br>
+<br>
+<br>
+<br>
+<br>
+<br>
+<br>
+<br>
+
+<h3>SILVA</h3>
+
+```{r render-silva-community}
+renderPlotly({
+  
+  silvaCompPlot <- PlotCommunityComposition(abdDF = CalculateAbundanceSILVA(),
+                                          taxRank = ifelse(isolate(input$communityTaxRank) == "Species",
+                                                           yes = "GenusSpecies",
+                                                           no = isolate(input$communityTaxRank)),
+                                          facetFormula = "~ condition") +
+    ggtitle(isolate(input$communityWeek)) +
+    theme(plot.title = element_text(hjust = 0.5, size = 14))
+  
+  ggplotly(silvaCompPlot, height = 600, width = 1000)
+})
+```
+
+<br>
+
+### **Alpha Diversity**
+
+<h3>Alpha Diversity Metrics</h3>
+
+<ul>
+  <li>Richness</li>
+  <li>Pielou's Evenness</li>
+  <li>Shannon Diversity</li>
+  <li>Faith's Phylogenetic Diversity (PD)</li>
+</ul>
+
+<br>
+
+Results are similar in both data sets.
+
+<br>
+
+```{r sampleDataRareAlpha}
+alphaIdxList <- list("Richness" = "observed",
+                     "Evenness" = "evenness_pielou",
+                     "Shannon Diversity" = "diversity_shannon",
+                     "Faith's PD" = "PD")
+
+alphaDivList <- map(.x = physeqListRare,
+                    .f = ~ microbiome::alpha(x = .x, 
+                                             index = c("observed",
+                                                       "diversity_shannon",
+                                                       "evenness_pielou")))
+
+# add faith's PD
+faithsPDList <- map(.x = physeqListRare,
+                    .f = ~ pd(samp = as.data.frame(.x@otu_table),
+                              tree = .x@phy_tree,
+                              include.root = FALSE))
+
+# combine alpha diversity metrics together, then merge with the sample data
+allAlphaDivList <- map2(.x = alphaDivList, .y = faithsPDList,
+                        .f = ~ merge(.x, .y, by = "row.names", all = TRUE) %>% 
+                          column_to_rownames(var = "Row.names"))
+
+# sampleDataRareAlpha contains "observed," "diversity_shannon," 
+#   "evenness_pielou," and "PD" columns
+sampleDataRareAlpha <- pmap(.l = list(x = sampleDataRare,
+                                      y = allAlphaDivList,
+                                      by.x = sampleNameColList),
+                            .f = base::merge,
+                            by.y = "row.names",
+                            all = TRUE)
+```
+
+```{r alpha-div}
+fluidRow(
+  column(5,
+         wellPanel(
+           selectInput(inputId = "alphaDivWeek", label = "Week:",
+                       choices = sort(unique(sampleDataModified$week)))
+           )
+         )
+  )
+
+FilterAlphaDF <- reactive({
+  filteredDFList <- map(.x = sampleDataRareAlpha,
+                        .f = ~ filter(.x, week == input$alphaDivWeek))
+})
+
+AlphaPlotsRDP <- reactive({
+  alphaPlotsRDP <- pmap(.l = list(yVar = alphaIdxList,
+                                  yLab = names(alphaIdxList),
+                                  alphaPlotTitle = names(alphaIdxList)),
+                        .f = PlotAlphaDiversity,
+                        df = FilterAlphaDF()$rdp,
+                        xVar = "condition",
+                        statMethod = "wilcox.test")
+})
+
+AlphaPlotsSILVA <- reactive({
+  alphaPlotsSILVA <- pmap(.l = list(yVar = alphaIdxList,
+                                    yLab = names(alphaIdxList),
+                                    alphaPlotTitle = names(alphaIdxList)),
+                          .f = PlotAlphaDiversity,
+                          df = FilterAlphaDF()$silva,
+                          xVar = "condition",
+                          statMethod = "wilcox.test")
+})
+```
+
+```{r render-alpha-rdp}
+renderPlot({
+  annotate_figure(grid.arrange(AlphaPlotsRDP()[["Richness"]],
+                             AlphaPlotsRDP()[["Faith's PD"]],
+                             AlphaPlotsRDP()[["Shannon Diversity"]],
+                             ncol = 2, nrow = 2),
+                top = text_grob(paste("Alpha Diversity RDP", 
+                                      isolate(input$alphaDivWeek)),
+                                size = 14),
+                bottom = text_grob("Condition", size = 14))
+}, width = 900, height = 900)
+```
+
+<br>
+
+**RDP Data:**
+
+<br>
+
+Significant differences between the control and fracture groups are seen:
+
+  * Week 9:
+    * Richness
+    * Faith's PD
+    * Shannon Diversity
+  * Week 16:
+    * Richness
+    * Faith's PD
+    * Shannon Diversity
+
+The average value for the fracture group is lower in each case.
+
+<br>
+<br>
+
+---
+
+<br>
+
+**SILVA Data:**
+
+<br>
+
+Significant differences between the control and fracture group are seen:
+
+  * Week 9:
+    * Richness
+    * Faith's PD
+    * Shannon Diversity
+  * Week 16:
+      * Richness
+      * Faith's PD
+      * Shannon Diversity
+
+The average value for the fracture group is lower in each case.
+
+<br>
+<br>
+
+```{r render-alpha-silva}
+renderPlot({
+  annotate_figure(grid.arrange(AlphaPlotsSILVA()[["Richness"]],
+                             AlphaPlotsRDP()[["Faith's PD"]],
+                             AlphaPlotsRDP()[["Shannon Diversity"]],
+                             ncol = 2, nrow = 2),
+                top = text_grob(paste("Alpha Diversity SILVA", 
+                                      isolate(input$alphaDivWeek)),
+                                size = 14),
+                bottom = text_grob("Condition", size = 14))
+}, width = 900, height = 900)
+```
+
+<br>
+<br>
+
+### **Beta Diversity**
+
+<br>
+
+<h3>Beta Diversity Metrics</h3>
+
+Unweighted UniFrac, unadjusted and adjusted PCoA plots.
+
+<br>
+
+```{r adjusted-pcoa-function-definitions}
+# ellipseYS() and code within CalculateEigen() are taken directly from the
+#   aPCoA_1.3.tar.gz package downloaded from CRAN on 4/25/2023. The main
+#   aPCoA function has been modified to calculate eigen values needed for 
+#   making the adjusted PCoA plot, which I've re-written to be done in ggplot2.
+
+ellipseYS <- function(center, shape, radius) {
+  segments<-51
+  if (! (is.vector(center) && 2==length(center))) stop("center must be a vector of length 2")
+  if (! (is.matrix(shape) && all(2==dim(shape)))) stop("shape must be a 2 by 2 matrix")
+  if (max(abs(shape - t(shape)))/max(abs(shape)) > 1e-10) stop("shape must be a symmetric matrix")
+  angles <- (0:segments)*2*pi/segments 
+  unit.circle <- cbind(cos(angles), sin(angles)) 
+  #	ellipse <- t(center + radius*t(unit.circle %*% chol(shape,pivot=TRUE))) 
+  Q <- chol(shape, pivot=TRUE)
+  order <- order(attr(Q, "pivot"))
+  ellipse <- t( center + radius*t( unit.circle %*% Q[,order]))
+  colnames(ellipse) <- c("x", "y")
+  ellipse
+}
+
+CalculateEigen <- function(formula, data) {
+  
+  Terms <- terms(formula, data = data) # "~" "unifracDist" "cage_num"
+  lhs <- formula[[2]] # unifracDist object
+  lhs <- eval(lhs, data, parent.frame())
+  formula[[2]] <- NULL
+  rhs.frame <- model.frame(formula, data, drop.unused.levels = TRUE)
+  rhs <- model.matrix(formula, rhs.frame)
+
+  grps <- attr(rhs, "assign")
+  qrhs <- qr(rhs)
+  rhs <- rhs[, qrhs$pivot, drop = FALSE]
+  rhs <- rhs[, 1:qrhs$rank, drop = FALSE]
+  grps <- grps[qrhs$pivot][1:qrhs$rank]
+  u.grps <- unique(grps)
+  nterms <- length(u.grps) - 1
+  if (nterms < 1) 
+    stop("right-hand-side of formula has no usable terms")
+  
+  dmat <- as.matrix(lhs^2) # distance matrix (unifracDist obj as matrix)
+
+  X<-rhs
+  y<-lhs # distance mtx
+
+  X<-X[rownames(dmat),]
+  X<-as.matrix(X[,-1],nrow=nrow(X))
+
+  H<-X%*%solve(t(X)%*%X)%*%t(X)
+
+  A<--1/2*as.matrix(y)^2
+  J<-diag(nrow(X))-matrix(rep(1/(nrow(X)),length(A)),nrow=nrow(A))
+  E<-(diag(nrow(H))-H)%*%J%*%A%*%J%*%(diag(nrow(H))-H)
+  rownames(E)<-rownames(data)
+  colnames(E)<-rownames(data)
+  
+  # eigen() decomposes the distance matrix
+  eigenE<-eigen(E)$vectors
+  eigenvalue<-eigen(E)$values
+  
+  # tempvector<-as.character(data[,as.character(substitute(maincov))])
+  # if(is.null(col)){
+  #   color1<-distinctColorPalette(length(unique(tempvector)))
+  # }else{
+  #   color1<-col
+  # }
+  # names(color1)<-unique(tempvector)
+  rownames(eigenE)<-rownames(data)
+  # centernames<-unique(tempvector)
+  # centers<-centernames
+
+  # for(i in 1:length(centernames)){
+  #   centers[i]<-rownames(pam(as.matrix(y)[tempvector==centernames[i],
+  #                                    tempvector==centernames[i]], 1)$medoids)
+  # }
+  # newcenters<-centers
+  # for(i in 1:length(centernames)){
+  #   newcenters[i]<-rownames(pam(E[tempvector==centernames[i],
+  #                                 tempvector==centernames[i]], 1)$medoids)
+  # }
+  # 
+  # origpcoa<-pcoa(y)
+
+  
+  
+  eigenInfo <- list("covariateAdjMtx" = E,
+                    "eigenE" = eigenE,
+                    "eigenvalue" = eigenvalue)
+}
+
+# AdjustedPCoAPlot() is my function for plotting the adjusted PCoA plot
+AdjustedPCoAPlot <- function(eigenInfo, sampleData, sampleNameCol,
+                             plotTitle = NULL,
+                             plotSubtitle = NULL) {
+
+  eigenE <- eigenInfo$eigenE
+  eigenvalue <- eigenInfo$eigenvalue
+  
+  # ~ Generate X and Y axis Data ~ #
+  # x-values:
+  xVals <- eigenE[, 1] * eigenvalue[1]^(1/2)
+  # y-values:
+  yVals <- eigenE[, 2] * eigenvalue[2]^(1/2)
+  # put in data frame
+  plottingDF <- data.frame(x_axis = xVals, y_axis = yVals)
+  
+  # ~ Condition Data ~ #
+  conditionLUT <- sampleData %>%
+    select(!!sym(sampleNameCol), condition) %>%
+    mutate(across(where(is.factor), as.character)) %>% 
+    deframe()
+  
+  plottingDF <- plottingDF %>%
+    rownames_to_column(var = "sample") %>%
+    mutate(condition = conditionLUT[sample])
+  
+  row.names(plottingDF) <- plottingDF$sample
+  
+  # ~ Shape and Color Values ~ #
+  conditionColors <- c("fracture" = "#FB0106", "control" = "blue")
+  conditionShapes <- c("fracture" = 17, "control" = 19)
+  
+  # ~ ggplot ~ #
+  ordPlot <- ggplot(data = plottingDF,
+                    aes(x = x_axis, y = y_axis, color = condition,
+                        shape = condition)) +
+    geom_point(size = 3) + 
+    ggtitle(plotTitle,
+            subtitle = plotSubtitle) +
+    scale_color_manual(values = conditionColors) +
+    scale_shape_manual(values = conditionShapes) +
+    xlab(paste(round(eigenvalue[1]/sum(eigenvalue)*100,2), "%")) +
+    ylab(paste(round(eigenvalue[2]/sum(eigenvalue)*100,2), "%")) +
+    stat_ellipse(type = "norm", level = 0.95) +
+    theme_bw() +
+    theme(plot.title = element_text(hjust = 0.5, size = 14),
+          plot.subtitle = element_text(hjust = 0.5),
+          panel.grid = element_blank())
+  
+  ordPlot
+}
+
+
+UnadjustedOrdPlot <- function(physeqObj, ordObj, shapeVar, colorVar,
+                              pointSize, colorValues, myTitle = NULL,
+                              mySubtitle = NULL) {
+  ordPlot <- plot_ordination(physeq = physeqObj,
+                             ordination = ordObj,
+                             shape = shapeVar,
+                             color = colorVar) +
+    geom_point(size = pointSize) +
+    scale_color_manual(values = colorValues) +
+    scale_shape_manual(values = c(1:10))+
+    stat_ellipse(type = "norm",
+                 aes(color = !!sym(colorVar), group = !!sym(colorVar))) +
+    theme_bw() +
+    ggtitle(myTitle, subtitle = mySubtitle) +
+    theme(plot.title = element_text(hjust = 0.5, size = 14),
+          plot.subtitle = element_text(hjust = 0.5, size = 12),
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank())
+}
+```
+
+```{r TEST, eval=FALSE}
+# week1OrdList <- map(.x = list("rdp" = physeqSubsetsByWeek$rdp$week_0,
+#                               "silva" = physeqSubsetsByWeek$silva$week_0),
+#                     .f = ordinate,
+#                     method = "PCoA",
+#                     distance = "unifrac")
+
+
+
+# plot_ordination(physeq = physeqSubsetsByWeek$rdp$week_0,
+#                 ordination = week1OrdList$rdp,
+#                 shape = "cage_num",
+#                 color = "condition") +
+#   geom_point(size = 2) +
+#   #scale_shape_manual(values = conditionShapes) +
+#   scale_color_manual(values = unlist(conditionColors)) +
+#   stat_ellipse(type = "norm",
+#                aes(color = condition, group = condition)) +
+#   theme_bw() +
+#   
+#   #guides(color = "none")
+
+```
+
+```{r beta-div-ui}
+
+#----- UI -----#
+
+fluidRow(
+  column(5,
+         wellPanel(
+           # select week
+           selectInput(inputId = "betaWeek",
+                       label = "Select Week:",
+                       choices = sort(unique(sampleDataModified$week)))
+         ))
+)
+
+#----- Deal with Start Up NULLS -----#
+
+SelectedWeek <- reactive({
+  selectedWeek <- input$betaWeek
+  if (is.null(selectedWeek)) {
+    selectedWeek <- "week_0"
+  }
+  return(selectedWeek)
+})
+```
+
+```{r beta-unadjusted-plots}
+#----- Reactive -----#
+
+# Calculate unadjusted UniFrac ordination for both RDP and SILVA
+
+PhyseqObjList <- reactive({
+  physeqObjList <- list("rdp" = physeqSubsetsByWeek$rdp[[SelectedWeek()]],
+                        "silva" = physeqSubsetsByWeek$silva[[SelectedWeek()]])
+})
+
+CalculateUniFrac <- reactive({
+  withProgress(message = "Calculating ordination...", value = 1, {
+    set.seed(27785150)
+    unadjUniFracOrdList <- map(.x = PhyseqObjList(),
+                               .f = ~ ordinate(physeq = .x,
+                                               method = "PCoA",
+                                               distance = "unifrac"))
+    
+  })
+})
+
+# Calculate ADONIS values
+AdonisValues <- reactive({
+  set.seed(27785150)
+  adonisResList <- map(.x = PhyseqObjList(),
+                       .f = RunAdonis,
+                       category = "condition", distance = "unifrac")
+  adonisPVals <- map(.x = adonisResList,
+                     .f = ~ .x$aov.tab$`Pr(>F)`[1])
+})
+
+UnadjustedPlots <- reactive({
+  unadjPlotList <- pmap(.l = list(physeqObj = PhyseqObjList(),
+                                  ordObj = CalculateUniFrac(),
+                                  myTitle = paste("Unadjusted PCoa UniFrac",
+                                                  toupper(names(PhyseqObjList)),
+                                                  SelectedWeek()),
+                                  mySubtitle = paste("ADONIS p:",
+                                                     AdonisValues())),
+                        .f = UnadjustedOrdPlot,
+                        shapeVar = "cage_num",
+                        colorVar = "condition",
+                        pointSize = 3,
+                        colorValues = unlist(conditionColors))
+})
+```
+
+```{r beta-adjusted-plots}
+AdjustedPlots <- reactive({
+  withProgress(message = "Calculating adjusted ordinations...", value = 1, {
+    
+    set.seed(27785150)
+    
+    cat("calculating unifrac\n")
+    # calculate unifrac distances
+    ufDistList <- map(.x = PhyseqObjList(),
+                      .f = ~ as.data.frame(
+                        as.matrix(UniFrac(., weighted = FALSE))))
+    cat("subsetting data frames\n")
+    # get sample data from subsetted data frames
+    sampleDataSubset <- map(.x = PhyseqObjList(),
+                            .f = ~ as(sample_data(.), "data.frame"))
+    cat("getting eigenvalues\n")
+    # calculate eigenvalues needed for plotting
+    eigenResList <- map2(.x = ufDistList,
+                         .y = sampleDataSubset,
+                         .f = ~ CalculateEigen(formula = .x ~ cage_num,
+                                               data = .y))
+    cat("getting plots\n")
+    # Generate plots
+    adjPCoAPlotList <- pmap(.l = list(eigenInfo = eigenResList,
+                                      sampleData = sampleDataSubset,
+                                      sampleNameCol = sampleNameColList,
+                                      plotTitle = paste("Covariate (cage) Adjusted PCoA UniFrac",
+                                                        toupper(names(sampleDataSubset)),
+                                                        SelectedWeek())),
+                            .f = AdjustedPCoAPlot)
+    return(adjPCoAPlotList)
+  })
+})
+
+#observe({print(AdjustedPlots())})
+```
+
+<br>
+
+**RDP Data:**
+
+```{r rdp-unadjusted-plot}
+
+# Render the unadjusted RDP PCoA plot
+renderPlot({
+  UnadjustedPlots()$rdp
+}, height = 500, width = 600)
+
+# render the adjusted RDP PCoA plot
+renderPlot({
+  AdjustedPlots()$rdp
+}, height = 500, width = 600)
+```
+
+<br>
+<br>
+
+---
+
+<br>
+<br>
+
+**SILVA Data:**
+
+```{r silva-unadjusted-plot}
+# Render the unadjusted SILVA PCoA plot
+renderPlot({
+  UnadjustedPlots()$silva
+}, height = 500, width = 600)
+
+# render the adjusted SILVA PCoA plot
+renderPlot({
+  AdjustedPlots()$silva
+}, height = 500, width = 600)
+```
+
+<br>
+
+### **Biomarker Analysis with DESeq2**
+
+```{r deseq-analysis}
+#----- UI -----#
+
+fluidRow(
+  column(5,
+         wellPanel(
+           selectInput(inputId = "biomarkerWeek",
+                       label = "Select Week:",
+                       choices = sort(unique(sampleDataModified$week))),
+           actionButton(inputId = "updateBiomarkers",
+                        label = "Update DESeq Analysis",
+                        icon = icon("fas fa-sync-alt"))
+         ))
+)
+
+#----- React -----#
+
+RunDESeq <- eventReactive(input$updateBiomarkers, {
+  
+  withProgress(message = "Conducting DESeq analysis by Condition...", 
+               value = 1, {
+                 deseqResList <- map(.x = list("rdp" = physeqSubsetsByWeek$rdp[[input$biomarkerWeek]],
+                                               "silva" = physeqSubsetsByWeek$silva[[input$biomarkerWeek]]),
+                                     .f = GenerateDESeqResults,
+                                     variable = "condition",
+                                     numerator = "fracture",
+                                     denominator = "control")
+               })
+}, ignoreNULL = FALSE)
+
+DESeqRes <- eventReactive(input$updateBiomarkers, {
+  deseqResTables <- map2(.x = list("rdp" = physeqSubsetsByWeek$rdp[[input$biomarkerWeek]],
+                                   "silva" = physeqSubsetsByWeek$silva[[input$biomarkerWeek]]),
+                         .y = RunDESeq(),
+                         .f = ~ GenerateDESeqResultsTable(physeq = .x,
+                                                          sigThreshold = 0.05,
+                                                          ddsResults = .y))
+}, ignoreNULL = FALSE)
+```
+
+<br>
+
+**RDP Data:**
+
+```{r rdp-biomarker-plot}
+renderPlotly({
+  volcano <- PlotStaticVolcano(physeq = physeqSubsetsByWeek$rdp[[isolate(input$biomarkerWeek)]],
+                               resultsDataTable = DESeqRes()$rdp,
+                               sigThreshold = 0.05,
+                               plotTitle = paste("Differentially Abundant Taxa\n",
+                                                 "Control (-L2FC) vs Fracture (+ L2FC)\n",
+                                                 "RDP Data", 
+                                                 isolate(input$biomarkerWeek)))
+  
+  ggplotly(volcano, tooltip = c("Phylum", "Family", "Genus", "Species",
+                                "log2FoldChange", "baseMean"),
+           height = 550, width = 900)
+})
+```
+
+<br>
+<br>
+<br>
+<br>
+<br>
+<br>
+<br>
+<br>
+<br>
+<br>
+
+---
+
+**SILVA Data**
+
+```{r silva-biomarker-plot}
+renderPlotly({
+  volcano <- PlotStaticVolcano(physeq = physeqSubsetsByWeek$silva[[isolate(input$biomarkerWeek)]],
+                               resultsDataTable = DESeqRes()$silva,
+                               sigThreshold = 0.05,
+                               plotTitle = paste("Differentially Abundant Taxa\n",
+                                                 "Control (-L2FC) vs Fracture (+ L2FC)\n",
+                                                 "SILVA Data", 
+                                                 isolate(input$biomarkerWeek)))
+  
+  ggplotly(volcano, tooltip = c("Phylum", "Family", "Genus", "Species",
+                                "log2FoldChange", "baseMean"),
+           height = 550, width = 900)
+})
+```
+
+<br>
+<br>
+<br>
+<br>
+<br>
+<br>
+<br>
+<br>
+
+### Session Info
+
+```{r session-info}
+Sys.Date()
+getwd()
+sessionInfo()
+```
+

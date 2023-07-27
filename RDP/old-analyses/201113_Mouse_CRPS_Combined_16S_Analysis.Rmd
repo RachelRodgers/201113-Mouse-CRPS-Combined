@@ -54,8 +54,8 @@ Analyzed:
   * treatment 2
 
 2. Comparison between combined cohorts by week:
-  * combined controls</li>
-  * combined treatments</li>
+  * combined controls
+  * combined treatments
 
 3. Comparison within combined cohorts (across weeks)
 
@@ -162,8 +162,6 @@ keepSamples <- sampleDataModified$sample[!(sampleDataModified$sample %in% lowRea
 physeqTrimmed <- physeqMerged %>% 
   prune_samples(samples = as.character(keepSamples)) %>% 
   RemoveMissingTaxa()
-
-physeqTrimmed # 942 taxa x 207 samples
 ```
 
 **By Clustering:**

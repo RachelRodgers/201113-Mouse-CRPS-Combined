@@ -1,4 +1,4 @@
-# 201113_Mouse_CRPS_Combined_Format_Metadata.R
+# 201113_MouseCRPSCombined_Format-Metadata.R
 
 # Combining metadata for mouse CRPS cohort 1 and cohort 2.
 # Needed variables:
